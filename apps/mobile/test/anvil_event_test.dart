@@ -90,6 +90,31 @@ void main() {
       expect(room.participants.single.displayName, 'Sarah');
       expect(room.participants.single.speaking, isFalse);
     });
+
+    test('a host-approval admission request carries who is asking', () {
+      // The host UI cannot admit a request without knowing both the peer and
+      // the name they asserted; the wire payload must carry both.
+      final event = AnvilEvent.fromJson({
+        'type': 'joinRequested',
+        'peerId': 'anv_${'05' * 32}',
+        'displayName': 'Sarah',
+      });
+
+      expect(event, isA<JoinRequested>());
+      final request = event as JoinRequested;
+      expect(request.peerId, 'anv_${'05' * 32}');
+      expect(request.displayName, 'Sarah');
+    });
+
+    test('a join denial names the peer the host refused', () {
+      final event = AnvilEvent.fromJson({
+        'type': 'joinDenied',
+        'peerId': 'anv_${'06' * 32}',
+      });
+
+      expect(event, isA<JoinDenied>());
+      expect((event as JoinDenied).peerId, 'anv_${'06' * 32}');
+    });
   });
 
   group('calls', () {

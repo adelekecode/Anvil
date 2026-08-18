@@ -11,11 +11,12 @@
 
 use core::time::Duration;
 
+#[cfg(feature = "crypto")]
 use anvil_core::crypto::GroupKeyManager;
 use anvil_core::discovery::{Advertisement, PeerAdvertisement, PeerTable};
 use anvil_core::protocol::{MediaHeader, MediaPacket, PacketType};
 use anvil_core::relay::{decide, elect, ElectionReason, ForwardDecision, RelayCandidate};
-use anvil_core::room::{Participant, RoomState};
+use anvil_core::room::{AdmissionPolicy, Participant, RoomState};
 use anvil_core::routing::{resolve_media, Topology};
 use anvil_core::transport::{Endpoint, PathKind, PathSample, SwitchDecision, TransportManager};
 use anvil_core::{Epoch, MediaTimestamp, Monotonic, PeerId, RelayConfig, SeqNum, TransportConfig};
@@ -38,7 +39,7 @@ fn participant(n: u8) -> Participant {
 #[test]
 fn losing_the_router_mid_call_does_not_disturb_the_room() {
     let now = Monotonic(1_000);
-    let mut room = RoomState::create(peer(1), "Alice".into(), now);
+    let mut room = RoomState::create(peer(1), "Alice".into(), AdmissionPolicy::Open, now);
     room.add_participant(participant(2), Epoch(1)).unwrap();
 
     let room_id_before = room.room_id;
@@ -92,7 +93,7 @@ fn losing_the_router_mid_call_does_not_disturb_the_room() {
 #[test]
 fn losing_the_relay_elects_a_new_one_without_rekeying() {
     let config = RelayConfig::default();
-    let mut room = RoomState::create(peer(1), "Alice".into(), Monotonic::ZERO);
+    let mut room = RoomState::create(peer(1), "Alice".into(), AdmissionPolicy::Open, Monotonic::ZERO);
     room.add_participant(participant(2), Epoch(1)).unwrap();
     room.add_participant(participant(3), Epoch(2)).unwrap();
     room.add_participant(participant(4), Epoch(3)).unwrap();
@@ -276,6 +277,7 @@ fn relayed_rooms_keep_the_senders_upload_at_one_stream() {
 }
 
 /// §50 — a departed member cannot decrypt anything sent after they left.
+#[cfg(feature = "crypto")]
 #[test]
 fn departure_removes_key_material() {
     use anvil_core::crypto::SenderKeyManager;

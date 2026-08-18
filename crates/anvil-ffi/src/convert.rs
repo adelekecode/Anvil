@@ -87,6 +87,10 @@ pub fn command_from_json(text: &str) -> Option<Command> {
                 .and_then(Value::as_str)
                 .map(|c| c.as_bytes().to_vec()),
         },
+        "respondToJoin" => Command::RespondToJoin {
+            peer_id: parse_peer_id(value.get("peerId")?.as_str()?)?,
+            accept: value.get("accept")?.as_bool()?,
+        },
         "leaveRoom" => Command::LeaveRoom,
         "mute" => Command::Mute,
         "unmute" => Command::Unmute,
@@ -315,6 +319,15 @@ pub fn event_to_json(event: &Event) -> String {
         Event::ParticipantLeft { peer_id } => json!({
             "type": "participantLeft",
             "peerId": peer_id.short(),
+        }),
+        Event::JoinRequested { peer_id, display_name } => json!({
+            "type": "joinRequested",
+            "peerId": anvil_core::identity::peer_id_string(*peer_id),
+            "displayName": display_name,
+        }),
+        Event::JoinDenied { peer_id } => json!({
+            "type": "joinDenied",
+            "peerId": anvil_core::identity::peer_id_string(*peer_id),
         }),
         Event::SpeakingChanged { peer_id, speaking } => json!({
             "type": "speakingChanged",
@@ -730,5 +743,55 @@ mod tests {
 
         assert_eq!(value["layer"], "transport");
         assert_eq!(value["message"], "no path");
+    }
+
+    #[test]
+    fn respond_to_join_round_trips_the_decision() {
+        let peer = anvil_core::PeerId([0x77; 32]);
+        let text = format!(
+            r#"{{"type":"respondToJoin","peerId":"{}","accept":true}}"#,
+            anvil_core::identity::peer_id_string(peer)
+        );
+        match command_from_json(&text) {
+            Some(Command::RespondToJoin { peer_id, accept: true }) => assert_eq!(peer_id, peer),
+            other => panic!("{other:?}"),
+        }
+
+        let deny = format!(
+            r#"{{"type":"respondToJoin","peerId":"{}","accept":false}}"#,
+            anvil_core::identity::peer_id_string(peer)
+        );
+        match command_from_json(&deny) {
+            Some(Command::RespondToJoin { accept: false, .. }) => {}
+            other => panic!("{other:?}"),
+        }
+
+        // Missing `accept` is rejected; a missing decision would silently
+        // default to admit and that is not something we ever want.
+        let no_flag = format!(
+            r#"{{"type":"respondToJoin","peerId":"{}"}}"#,
+            anvil_core::identity::peer_id_string(peer)
+        );
+        assert!(command_from_json(&no_flag).is_none());
+    }
+
+    #[test]
+    fn join_requested_and_denied_events_carry_their_fields() {
+        let peer = anvil_core::PeerId([0x88; 32]);
+        let requested = event_to_json(&Event::JoinRequested {
+            peer_id: peer,
+            display_name: "Bob".into(),
+        });
+        let value: Value = serde_json::from_str(&requested).unwrap();
+        assert_eq!(value["type"], "joinRequested");
+        assert_eq!(value["displayName"], "Bob");
+        assert_eq!(
+            value["peerId"],
+            anvil_core::identity::peer_id_string(peer)
+        );
+
+        let denied = event_to_json(&Event::JoinDenied { peer_id: peer });
+        let value: Value = serde_json::from_str(&denied).unwrap();
+        assert_eq!(value["type"], "joinDenied");
     }
 }

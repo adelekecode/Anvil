@@ -53,6 +53,12 @@ class AnvilController extends ChangeNotifier {
   bool _muted = false;
   String? _lastError;
   Map<String, dynamic>? _diagnostics;
+  /// Pending host-approval admission requests, keyed by the asker's peer id.
+  /// The host UI surfaces these and calls [respondToJoin] to resolve each one.
+  final Map<String, String> _pendingJoinRequests = {};
+  /// Set when this device's own join request was refused by the host. The
+  /// joiner UI clears this once it has shown the user the refusal.
+  String? _lastJoinDeniedBy;
 
   // --- identity ---------------------------------------------------------
 
@@ -72,6 +78,20 @@ class AnvilController extends ChangeNotifier {
   String? get lastError => _lastError;
   Map<String, dynamic>? get diagnostics => _diagnostics;
   IdentityWarning? get identityWarning => _identityWarning;
+
+  /// Pending host-approval admission requests, newest first.
+  List<MapEntry<String, String>> get pendingJoinRequests =>
+      _pendingJoinRequests.entries.toList();
+
+  /// Peer id that just refused our join, if any. Cleared after the UI
+  /// surfaces it once.
+  String? get lastJoinDeniedBy => _lastJoinDeniedBy;
+  void clearJoinDenied() {
+    if (_lastJoinDeniedBy != null) {
+      _lastJoinDeniedBy = null;
+      notifyListeners();
+    }
+  }
 
   /// Whether media is flowing normally.
   bool get isSettled => _state == AnvilState.connected;
@@ -154,6 +174,19 @@ class AnvilController extends ChangeNotifier {
 
   void createRoom() => _api.createRoom();
   void joinRoomByCode(String code) => _api.joinRoomByCode(code);
+  void joinRoom(String roomId, {String? credential}) =>
+      _api.joinRoom(roomId, credential: credential);
+
+  /// Admit or refuse a pending join request when the room uses host approval.
+  ///
+  /// Drops the entry from [_pendingJoinRequests] on the host side so the UI
+  /// stops showing the prompt; the eventual [ParticipantJoined] (or no event
+  /// at all, on refusal) is what settles the membership view.
+  void respondToJoin(String peerId, {required bool accept}) {
+    _pendingJoinRequests.remove(peerId);
+    _api.respondToJoin(peerId, accept: accept);
+  }
+
   void leaveRoom() => _api.leaveRoom();
   void requestDiagnostics() => _api.requestDiagnostics();
 
@@ -274,6 +307,7 @@ class AnvilController extends ChangeNotifier {
       case RoomLeft():
         _room = null;
         _transports.clear();
+        _pendingJoinRequests.clear();
 
       case ParticipantJoined(:final participant):
         _updateRoom((room) => [...room.participants, participant]);
@@ -281,6 +315,15 @@ class AnvilController extends ChangeNotifier {
       case ParticipantLeft(:final peerId):
         _updateRoom(
             (room) => room.participants.where((p) => p.peerId != peerId).toList());
+
+      case JoinRequested(:final peerId, :final displayName):
+        _pendingJoinRequests[peerId] = displayName;
+
+      case JoinDenied(:final peerId):
+        // On the host side this clears a pending request we just refused.
+        // On the joiner side this signals that the host rejected us.
+        _pendingJoinRequests.remove(peerId);
+        _lastJoinDeniedBy = peerId;
 
       case SpeakingChanged(:final peerId, :final speaking):
         _updateRoom((room) => room.participants

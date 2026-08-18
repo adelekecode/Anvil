@@ -470,6 +470,11 @@ sealed class AnvilEvent {
       'roomLeft' => RoomLeft(json['reason'] as String? ?? ''),
       'participantJoined' => ParticipantJoined(Participant.fromJson(json)),
       'participantLeft' => ParticipantLeft(json['peerId'] as String? ?? ''),
+      'joinRequested' => JoinRequested(
+          json['peerId'] as String? ?? '',
+          json['displayName'] as String? ?? 'Unknown',
+        ),
+      'joinDenied' => JoinDenied(json['peerId'] as String? ?? ''),
       'speakingChanged' => SpeakingChanged(
           json['peerId'] as String? ?? '',
           json['speaking'] as bool? ?? false,
@@ -618,6 +623,25 @@ class ParticipantJoined extends AnvilEvent {
 
 class ParticipantLeft extends AnvilEvent {
   const ParticipantLeft(this.peerId);
+  final String peerId;
+}
+
+/// A nearby authenticated peer asked to join a host-approved room.
+///
+/// The host UI surfaces this and calls [AnvilController.respondToJoin] to
+/// admit or refuse. No membership change happens until that command arrives.
+class JoinRequested extends AnvilEvent {
+  const JoinRequested(this.peerId, this.displayName);
+
+  final String peerId;
+  final String displayName;
+}
+
+/// A pending join was refused by the host. The joiner UI uses this to clear
+/// the "waiting to be admitted" state rather than leaving it up forever.
+class JoinDenied extends AnvilEvent {
+  const JoinDenied(this.peerId);
+
   final String peerId;
 }
 

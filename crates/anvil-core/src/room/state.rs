@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use crate::time::Monotonic;
 use crate::{Epoch, PeerId, Result, RoomError, RoomId};
 
-use super::membership::Participant;
+use super::membership::{AdmissionPolicy, Participant};
 
 /// This node's view of a room.
 #[derive(Clone, Debug)]
@@ -37,14 +37,25 @@ pub struct RoomState {
     pub relay: Option<PeerId>,
     /// Whether this node created the room and handles admission (§68).
     pub is_host: bool,
+    /// How the host decides who to admit. Joiners see `Open` once they are in.
+    pub admission: AdmissionPolicy,
     /// When the room was created or joined.
     pub since: Monotonic,
 }
 
 impl RoomState {
     /// Create a room hosted by this device.
+    ///
+    /// Defaults to [`AdmissionPolicy::JoinCode`] with the supplied human code —
+    /// the v0.1 host reads the code out and anyone who heard it can join. The
+    /// host may tighten this later via [`Self::set_admission`].
     #[must_use]
-    pub fn create(local_peer_id: PeerId, display_name: String, now: Monotonic) -> Self {
+    pub fn create(
+        local_peer_id: PeerId,
+        display_name: String,
+        admission: AdmissionPolicy,
+        now: Monotonic,
+    ) -> Self {
         let mut participants = BTreeMap::new();
         participants.insert(local_peer_id, Participant::new(local_peer_id, display_name, now));
 
@@ -55,6 +66,7 @@ impl RoomState {
             participants,
             relay: None,
             is_host: true,
+            admission,
             since: now,
         }
     }
@@ -76,7 +88,19 @@ impl RoomState {
             participants: participants.into_iter().map(|p| (p.peer_id, p)).collect(),
             relay,
             is_host: false,
+            // Joiners do not run admission; once you are in, the policy is just
+            // "everyone else here is a member". The host's policy still applies
+            // to *future* join requests.
+            admission: AdmissionPolicy::Open,
             since: now,
+        }
+    }
+
+    /// Change who the host admits. Ignored on a joiner (the host's policy is
+    /// the one that matters for incoming requests).
+    pub fn set_admission(&mut self, admission: AdmissionPolicy) {
+        if self.is_host {
+            self.admission = admission;
         }
     }
 
@@ -167,6 +191,7 @@ impl RoomState {
             local_peer_id: self.local_peer_id,
             is_host: self.is_host,
             is_direct: self.is_direct(),
+            admission: self.admission.clone(),
         }
     }
 }
@@ -191,6 +216,8 @@ pub struct RoomSnapshot {
     pub is_host: bool,
     /// Whether media is peer-to-peer.
     pub is_direct: bool,
+    /// The host's admission policy. Joiners see `Open`.
+    pub admission: AdmissionPolicy,
 }
 
 #[cfg(test)]
@@ -203,24 +230,29 @@ mod tests {
         PeerId(bytes)
     }
 
+    fn open_room(host: PeerId) -> RoomState {
+        RoomState::create(host, format!("peer{host}"), AdmissionPolicy::Open, Monotonic::ZERO)
+    }
+
     fn participant(n: u8) -> Participant {
         Participant::new(peer(n), format!("peer{n}"), Monotonic::ZERO)
     }
 
     #[test]
     fn a_new_room_contains_only_its_host() {
-        let room = RoomState::create(peer(1), "Alice".into(), Monotonic::ZERO);
+        let room = open_room(peer(1));
 
         assert_eq!(room.size(), 1);
         assert!(room.is_host);
         assert!(room.is_direct());
         assert_eq!(room.relay, None);
         assert_eq!(room.others().count(), 0);
+        assert!(matches!(room.admission, AdmissionPolicy::Open));
     }
 
     #[test]
     fn two_people_need_no_relay_three_do() {
-        let mut room = RoomState::create(peer(1), "Alice".into(), Monotonic::ZERO);
+        let mut room = open_room(peer(1));
         room.add_participant(participant(2), Epoch(1)).unwrap();
         assert!(room.is_direct(), "a two-person room must not insert a relay hop");
 
@@ -230,7 +262,7 @@ mod tests {
 
     #[test]
     fn membership_changes_advance_the_epoch() {
-        let mut room = RoomState::create(peer(1), "Alice".into(), Monotonic::ZERO);
+        let mut room = open_room(peer(1));
         assert_eq!(room.epoch, Epoch(0));
 
         room.add_participant(participant(2), Epoch(1)).unwrap();
@@ -244,7 +276,7 @@ mod tests {
     #[test]
     fn stale_membership_messages_cannot_resurrect_a_departed_member() {
         // The attack: replay the join message for someone who has since left.
-        let mut room = RoomState::create(peer(1), "Alice".into(), Monotonic::ZERO);
+        let mut room = open_room(peer(1));
         room.add_participant(participant(2), Epoch(1)).unwrap();
         room.remove_participant(peer(2), Epoch(2)).unwrap();
 
@@ -255,7 +287,7 @@ mod tests {
 
     #[test]
     fn losing_the_relay_clears_it_without_ending_the_room() {
-        let mut room = RoomState::create(peer(1), "Alice".into(), Monotonic::ZERO);
+        let mut room = open_room(peer(1));
         room.add_participant(participant(2), Epoch(1)).unwrap();
         room.add_participant(participant(3), Epoch(2)).unwrap();
         room.set_relay(Some(peer(3))).unwrap();
@@ -269,29 +301,52 @@ mod tests {
 
     #[test]
     fn a_non_member_cannot_be_made_relay() {
-        let mut room = RoomState::create(peer(1), "Alice".into(), Monotonic::ZERO);
+        let mut room = open_room(peer(1));
         assert!(room.set_relay(Some(peer(9))).is_err());
     }
 
     #[test]
     fn removing_someone_who_is_not_a_member_fails() {
-        let mut room = RoomState::create(peer(1), "Alice".into(), Monotonic::ZERO);
+        let mut room = open_room(peer(1));
         assert!(room.remove_participant(peer(9), Epoch(1)).is_err());
     }
 
     #[test]
     fn participant_ordering_is_identical_on_every_device() {
         // Election tie-breaks depend on this.
-        let mut a = RoomState::create(peer(1), "Alice".into(), Monotonic::ZERO);
+        let mut a = open_room(peer(1));
         a.add_participant(participant(3), Epoch(1)).unwrap();
         a.add_participant(participant(2), Epoch(2)).unwrap();
 
-        let mut b = RoomState::create(peer(1), "Alice".into(), Monotonic::ZERO);
+        let mut b = open_room(peer(1));
         b.add_participant(participant(2), Epoch(1)).unwrap();
         b.add_participant(participant(3), Epoch(2)).unwrap();
 
         let order_a: Vec<PeerId> = a.participants.keys().copied().collect();
         let order_b: Vec<PeerId> = b.participants.keys().copied().collect();
         assert_eq!(order_a, order_b);
+    }
+
+    #[test]
+    fn set_admission_is_a_no_op_on_a_joiner() {
+        // §68: admission is the host's call. A joiner that "sets" it just
+        // renames its own view, which is meaningless and must not propagate.
+        let room = RoomState::create(
+            peer(1),
+            "Alice".into(),
+            AdmissionPolicy::HostApproval,
+            Monotonic::ZERO,
+        );
+        let snapshot_before = room.snapshot();
+        let mut joined = RoomState::joined(
+            room.room_id,
+            peer(2),
+            Epoch(0),
+            snapshot_before.participants,
+            None,
+            Monotonic::ZERO,
+        );
+        joined.set_admission(AdmissionPolicy::Open);
+        assert!(matches!(joined.admission, AdmissionPolicy::Open));
     }
 }

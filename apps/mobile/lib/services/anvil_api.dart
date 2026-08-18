@@ -156,6 +156,18 @@ class AnvilApi {
   void joinRoomByCode(String code) =>
       _send({'type': 'joinRoomByCode', 'code': code});
 
+  /// Admit or refuse a pending join request when the room uses host approval.
+  ///
+  /// The host's UI calls this in response to [`JoinRequested`] being emitted.
+  /// On `accept = true` the engine admits the peer and pushes a fresh sender
+  /// key down (`AppControl::MediaKey`). On `accept = false` it drops the
+  /// request and emits [`JoinDenied`] so the joiner's UI stops waiting.
+  void respondToJoin(String peerId, {required bool accept}) => _send({
+        'type': 'respondToJoin',
+        'peerId': peerId,
+        'accept': accept,
+      });
+
   /// Leave the current room.
   void leaveRoom() => _send({'type': 'leaveRoom'});
 

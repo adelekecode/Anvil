@@ -53,6 +53,9 @@ use core::fmt;
 
 use crate::RoomId;
 
+#[cfg(feature = "crypto")]
+use sha2::Sha256;
+
 /// Crockford base32: no `I`, `L`, `O` or `U`.
 ///
 /// `I`/`L` are excluded because they are indistinguishable from `1` when read
@@ -144,22 +147,37 @@ impl JoinCode {
     /// coordination. It occupies the same 4-byte advertisement slot as the room
     /// hint, which is all the budget Wi-Fi Aware allows.
     ///
-    /// PHASE2: this must become HKDF-SHA-256 over a domain-separated input once
-    /// the `crypto` feature lands. The mixing below is deterministic and
-    /// well-distributed, which is what discovery needs, but it is **not** a
-    /// cryptographic hash and nothing security-relevant may rest on it. Given
-    /// the 40-bit code above it, that distinction is smaller than it sounds —
-    /// but it should still be the real thing.
+    /// On the `crypto` feature this is HKDF-SHA-256, domain-separated, and
+    /// truncated to 32 bits. The FNV-1a fallback exists only so the no-crypto
+    /// build — which is the one that ships in the Phase 0 scaffold — still
+    /// has a deterministic, well-distributed token to advertise. The token is
+    /// not a security boundary either way: a 40-bit join code is the actual
+    /// admission check, and a 32-bit truncation of any hash is brute-forceable
+    /// in microseconds. The point of using HKDF here is to keep the *shape*
+    /// honest so the future wire format does not have to change.
     #[must_use]
     pub fn discovery_token(&self) -> u32 {
-        // FNV-1a, domain-separated so a token can never collide with a
-        // truncated RoomId used for the same field.
-        let mut hash: u32 = 0x811C_9DC5;
-        for byte in b"anvil-room-token/v1".iter().chain(self.chars.iter()) {
-            hash ^= u32::from(*byte);
-            hash = hash.wrapping_mul(0x0100_0193);
+        #[cfg(feature = "crypto")]
+        {
+            use hkdf::Hkdf;
+            let hk = Hkdf::<Sha256>::new(None, &self.chars);
+            let info = b"anvil-room-token/v1";
+            let mut okm = [0u8; 4];
+            hk.expand(info, &mut okm)
+                .expect("4-byte expand is always within HKDF limits");
+            u32::from_be_bytes(okm)
         }
-        hash
+        #[cfg(not(feature = "crypto"))]
+        {
+            // FNV-1a, domain-separated so a token can never collide with a
+            // truncated RoomId used for the same field.
+            let mut hash: u32 = 0x811C_9DC5;
+            for byte in b"anvil-room-token/v1".iter().chain(self.chars.iter()) {
+                hash ^= u32::from(*byte);
+                hash = hash.wrapping_mul(0x0100_0193);
+            }
+            hash
+        }
     }
 }
 
@@ -315,5 +333,31 @@ mod tests {
         let second = RoomIdentity { room_id: RoomId::generate(), join_code: shared_code };
         assert_ne!(first.room_id, second.room_id);
         assert_eq!(first.discovery_token(), second.discovery_token());
+    }
+
+    /// Pin the discovery_token to a known value so swapping the underlying
+    /// hash function cannot silently change what every existing room advertises.
+    /// The exact bytes here are not security-relevant — they are the value
+    /// peers look for in the Wi-Fi Aware / LAN advertisement slots — but they
+    /// *are* protocol-relevant: changing them would orphan every in-flight room.
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn discovery_token_is_stable_under_hkdf() {
+        let code = JoinCode::parse("ANV-7FK2-P9W4").unwrap();
+        assert_eq!(code.discovery_token(), 0xe4f1_9b4f);
+    }
+
+    /// Mirror test for the no-crypto fallback, so the scaffold build has its
+    /// own stable advertisement value to ship with.
+    #[cfg(not(feature = "crypto"))]
+    #[test]
+    fn discovery_token_is_stable_under_fnv1a() {
+        let code = JoinCode::parse("ANV-7FK2-P9W4").unwrap();
+        let mut expected: u32 = 0x811C_9DC5;
+        for byte in b"anvil-room-token/v1".iter().chain(b"7FK2P9W4".iter()) {
+            expected ^= u32::from(*byte);
+            expected = expected.wrapping_mul(0x0100_0193);
+        }
+        assert_eq!(code.discovery_token(), expected);
     }
 }

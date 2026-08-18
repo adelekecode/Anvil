@@ -49,6 +49,7 @@ pub mod handshake;
 pub mod identity;
 pub mod key_store;
 pub mod media;
+#[cfg(feature = "crypto")]
 pub mod sender_key;
 #[cfg(feature = "crypto")]
 pub mod session;
@@ -60,10 +61,12 @@ pub use handshake::{Handshake, HandshakeState};
 pub use identity::{DeviceIdentity, IdentityFingerprint, PublicIdentity};
 pub use key_store::IdentityStore;
 pub use media::{MediaKey, ReplayWindow, NONCE_LEN};
+#[cfg(feature = "crypto")]
 pub use sender_key::SenderKeyManager;
 #[cfg(feature = "crypto")]
 pub use session::{EstablishedSession, SessionHandshake};
 
+#[cfg(feature = "crypto")]
 use crate::{Epoch, PeerId, Result};
 
 /// The seam between the protocol and whatever group key scheme is in use.
@@ -75,6 +78,7 @@ use crate::{Epoch, PeerId, Result};
 /// for the room, open a frame from a member, advance on membership change —
 /// rather than in terms of keys, so that a scheme with a different key
 /// structure can satisfy it without contortion.
+#[cfg(feature = "crypto")]
 pub trait GroupKeyManager: Send + core::fmt::Debug {
     /// Current epoch.
     fn epoch(&self) -> Epoch;

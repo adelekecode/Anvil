@@ -194,6 +194,24 @@ pub enum Event {
         peer_id: PeerId,
     },
 
+    /// A nearby authenticated peer asked to join a host-approved room (§68).
+    ///
+    /// The host UI calls `Command::RespondToJoin { peer_id, accept }` to admit
+    /// or refuse. No membership state changes until that command arrives.
+    JoinRequested {
+        /// Who is asking.
+        peer_id: PeerId,
+        /// Display name they presented over their authenticated session.
+        display_name: String,
+    },
+
+    /// A pending join request was refused by the host. The joiner's UI uses
+    /// this to show a "room host declined" state rather than waiting forever.
+    JoinDenied {
+        /// Who was refused.
+        peer_id: PeerId,
+    },
+
     /// A participant started or stopped transmitting speech (VAD-driven).
     /// Drives the "who is talking" indicator.
     SpeakingChanged {
