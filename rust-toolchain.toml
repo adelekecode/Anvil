@@ -1,0 +1,12 @@
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+
+# Mobile targets are deliberately NOT listed here.
+#
+# Listing them makes rustup try to install all of them on any cargo invocation,
+# including on a machine that only wants to run `cargo test` — which fails
+# offline and is slow everywhere. Add them when you start the mobile phases:
+#
+#   rustup target add aarch64-linux-android armv7-linux-androideabi
+#   rustup target add aarch64-apple-ios aarch64-apple-ios-sim

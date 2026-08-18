@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = ["crates/anvil-core", "crates/anvil-ffi"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "Apache-2.0"
+repository = "https://github.com/anvil/anvil"
+
+[workspace.dependencies]
+anvil-core = { path = "crates/anvil-core" }
+
+# --- always on -------------------------------------------------------------
+thiserror = "2"
+tracing = "0.1"
+bytes = "1"
+rand_core = { version = "0.6", features = ["getrandom"] }
+zeroize = { version = "1", features = ["derive"] }
+
+# --- crypto (feature `crypto`) ---------------------------------------------
+# Established primitives only. See protocol/encryption.md.
+ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+
+# --- transport (feature `quic`) --------------------------------------------
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
+# --- audio (feature `opus`) ------------------------------------------------
+# NOTE: pulls in libopus via a C build. Kept off by default so the workspace
+# builds on a bare toolchain. Enable once Phase 1 audio work starts.
+audiopus = "0.2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+# Audio + crypto paths are unusably slow in a fully unoptimised build.
+opt-level = 1

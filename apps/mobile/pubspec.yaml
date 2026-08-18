@@ -1,0 +1,27 @@
+name: anvil
+description: >-
+  Anvil — offline-first, end-to-end encrypted local voice rooms.
+  Flutter shell over the anvil-core Rust protocol engine.
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+  flutter: ">=3.22.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # dart:ffi is part of the SDK; ffi provides the string helpers around it.
+  ffi: ^2.1.0
+  # Runtime permission requests. The protocol never asks for a permission
+  # itself — it reports that one is required and the UI decides how to ask.
+  permission_handler: ^11.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
