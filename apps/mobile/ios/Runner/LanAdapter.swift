@@ -32,9 +32,15 @@ final class LanAdapter {
     private var browser: NWBrowser?
     private var listener: NWListener?
     private let monitor = NWPathMonitor(requiredInterfaceType: .wifi)
+    private let queue = DispatchQueue(label: "dev.anvil.lan")
+    private var services: [String: NWEndpoint] = [:]
 
     init(emit: @escaping (PlatformEvent) -> Void) {
         self.emit = emit
+        monitor.pathUpdateHandler = { [weak self] path in
+            self?.emit(.networkChanged(kind: "lan", available: path.status != .unsatisfied))
+        }
+        monitor.start(queue: queue)
     }
 
     /// Whether Wi-Fi is attached.
@@ -42,7 +48,10 @@ final class LanAdapter {
     /// Deliberately does not require `status == .satisfied` for *internet* —
     /// a router with no WAN is a perfectly good Anvil network.
     func isAvailable() -> Bool {
-        monitor.currentPath.status != .unsatisfied
+        // The monitor's initial snapshot is `.unsatisfied` until its queue has
+        // delivered once. Bonjour itself is the authoritative availability
+        // signal, so do not suppress the first browse during that window.
+        true
     }
 
     /// There is no API for this. Returning true optimistically and letting
@@ -51,18 +60,75 @@ final class LanAdapter {
     func hasLocalNetworkPermission() -> Bool { true }
 
     func startDiscovery() {
-        // PHASE1: NWBrowser over bonjourWithTXTRecord("_anvil._udp", nil),
-        // emitting PeerAdvertised per result with the TXT payload.
-        fatalError("Phase 1: NWBrowser discovery")
+        guard browser == nil else { return }
+        let parameters = NWParameters.udp
+        parameters.includePeerToPeer = true
+        parameters.prohibitedInterfaceTypes = [.cellular]
+
+        let browser = NWBrowser(
+            for: .bonjourWithTXTRecord(type: Self.serviceType, domain: nil),
+            using: parameters
+        )
+        browser.browseResultsChangedHandler = { [weak self] _, changes in
+            guard let self else { return }
+            for change in changes {
+                switch change {
+                case let .added(result): self.found(result)
+                case let .changed(_, new, _): self.found(new)
+                case let .removed(result): self.lost(result)
+                case .identical: break
+                @unknown default: break
+                }
+            }
+        }
+        browser.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .ready: self?.emit(.networkChanged(kind: "lan", available: true))
+            case .failed, .waiting:
+                self?.emit(.networkChanged(kind: "lan", available: false))
+            default: break
+            }
+        }
+        self.browser = browser
+        browser.start(queue: queue)
     }
 
     func stopDiscovery() {
         browser?.cancel()
         browser = nil
+        let handles = services.keys
+        services.removeAll()
+        handles.forEach { emit(.peerAdvertisementLost(kind: "lan", handle: $0)) }
     }
 
     func advertise(_ payload: Data) {
-        // PHASE1: NWListener with an NWTXTRecord carrying the payload.
+        stopAdvertising()
+        let parameters = NWParameters.udp
+        parameters.includePeerToPeer = true
+        parameters.prohibitedInterfaceTypes = [.cellular]
+        do {
+            let listener = try NWListener(using: parameters)
+            listener.service = NWListener.Service(
+                name: nil,
+                type: Self.serviceType,
+                domain: nil,
+                txtRecord: NWTXTRecord([Self.txtKey: payload.base64EncodedString()])
+            )
+            listener.newConnectionHandler = { connection in
+                // The transport layer adopts inbound connections in the next
+                // step; rejecting here is preferable to silently retaining one.
+                connection.cancel()
+            }
+            listener.stateUpdateHandler = { state in
+                if case let .failed(error) = state {
+                    NSLog("Anvil: Bonjour listener failed: \(error)")
+                }
+            }
+            self.listener = listener
+            listener.start(queue: queue)
+        } catch {
+            NSLog("Anvil: could not advertise Bonjour service: \(error)")
+        }
     }
 
     func stopAdvertising() {
@@ -75,4 +141,38 @@ final class LanAdapter {
         // Emit PathEstablished or PathLost carrying pathId. No retry here.
         fatalError("Phase 1: LAN QUIC connect")
     }
+
+    private func found(_ result: NWBrowser.Result) {
+        guard case let .bonjour(record) = result.metadata,
+              let encoded = record.dictionary[Self.txtKey],
+              let payload = Data(base64Encoded: encoded)
+        else { return }
+
+        let handle = Self.handle(for: result.endpoint)
+        services[handle] = result.endpoint
+        emit(
+            .peerAdvertised(
+                kind: "lan",
+                handle: handle,
+                address: handle,
+                payload: payload
+            )
+        )
+    }
+
+    private func lost(_ result: NWBrowser.Result) {
+        let handle = Self.handle(for: result.endpoint)
+        services.removeValue(forKey: handle)
+        emit(.peerAdvertisementLost(kind: "lan", handle: handle))
+    }
+
+    private static func handle(for endpoint: NWEndpoint) -> String {
+        switch endpoint {
+        case let .service(name, type, domain, _): return "\(name).\(type).\(domain)"
+        default: return String(describing: endpoint)
+        }
+    }
+
+    private static let serviceType = "_anvil._udp"
+    private static let txtKey = "anvil"
 }

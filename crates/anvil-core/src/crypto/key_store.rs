@@ -34,7 +34,7 @@ pub trait IdentityStore: Send + Sync + core::fmt::Debug {
     fn clear(&self) -> Result<()>;
 }
 
-impl<T: crate::platform::KeyStoreAdapter> IdentityStore for T {
+impl<T: crate::platform::KeyStoreAdapter + ?Sized> IdentityStore for T {
     fn load(&self) -> Result<Option<Vec<u8>>> {
         self.load_identity()
     }

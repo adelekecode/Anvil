@@ -38,7 +38,7 @@ use std::sync::Arc;
 
 use crate::audio::{JitterBuffer, Mixer, VoiceActivityDetector};
 use crate::chat::{Conversation, DeliveryState, History, Message};
-use crate::crypto::SenderKeyManager;
+use crate::crypto::{DeviceIdentity, SenderKeyManager};
 use crate::diagnostics::Counters;
 use crate::discovery::PeerTable;
 use crate::identity::{KnownPeers, LocalProfile, PublicIdentity, TofuOutcome};
@@ -197,6 +197,8 @@ pub struct Engine {
     /// `None` until first run completes. Its absence is what puts the app on
     /// the display-name screen — there is no other gate.
     profile: Option<LocalProfile>,
+    /// Long-lived signing identity. Its private half never crosses the UI FFI.
+    device_identity: Option<DeviceIdentity>,
     known_peers: KnownPeers,
     call: CallState,
     history: History,
@@ -262,6 +264,7 @@ impl Engine {
             state: AppState::Initializing,
             local_peer_id,
             profile: None,
+            device_identity: None,
             known_peers: KnownPeers::new(),
             call: CallState::Idle,
             history: History::new(),
@@ -577,10 +580,34 @@ impl Engine {
             }
         };
 
-        // PHASE2: generate a real Ed25519 keypair and persist it through
-        // KeyStoreAdapter. The identity is derived from the key, so this is the
-        // one place key generation happens.
-        let identity = PublicIdentity::new(self.local_peer_id.0);
+        if self.device_identity.is_none() {
+            let loaded = self.platform.load_identity().and_then(|stored| match stored {
+                Some(stored) if stored.len() >= 32 => {
+                    let mut secret = [0u8; 32];
+                    secret.copy_from_slice(&stored[..32]);
+                    DeviceIdentity::from_secret(secret)
+                }
+                Some(_) => {
+                    Err(crate::CryptoError::KeyStorage("stored identity is truncated".into())
+                        .into())
+                }
+                None => {
+                    let identity = DeviceIdentity::generate();
+                    self.platform.store_identity(&identity.secret_bytes())?;
+                    Ok(identity)
+                }
+            });
+            match loaded {
+                Ok(identity) => self.device_identity = Some(identity),
+                Err(error) => {
+                    self.emit_error("crypto", &error);
+                    return;
+                }
+            }
+        }
+        let identity = self.device_identity.as_ref().expect("identity just loaded").public();
+        self.local_peer_id = identity.peer_id();
+        self.keys = SenderKeyManager::new(self.local_peer_id);
         let now = self.clock.now();
 
         match LocalProfile::new(&name, identity, now) {
@@ -588,6 +615,10 @@ impl Engine {
                 self.config.display_name = profile.display_name.clone();
                 self.local_peer_id = profile.peer_id;
                 self.profile = Some(profile.clone());
+                if let Err(error) = self.persist_profile() {
+                    self.emit_error("crypto", &error);
+                    return;
+                }
                 self.sink.emit(Event::ProfileReady { profile });
                 self.set_state(AppState::Idle);
                 self.refresh_advertisement();
@@ -609,8 +640,72 @@ impl Engine {
 
         self.config.display_name = profile.display_name.clone();
         let profile = profile.clone();
+        if let Err(error) = self.persist_profile() {
+            self.emit_error("crypto", &error);
+            return;
+        }
         self.sink.emit(Event::ProfileReady { profile });
         self.refresh_advertisement();
+    }
+
+    /// Restore identity plus display name after the native keystore attaches.
+    fn restore_profile(&mut self) {
+        let stored = match self.platform.load_identity() {
+            Ok(Some(stored)) => stored,
+            Ok(None) => return,
+            Err(error) => {
+                self.emit_error("crypto", &error);
+                return;
+            }
+        };
+        if stored.len() < 32 {
+            self.emit_error_message("crypto", "stored identity is truncated".into());
+            return;
+        }
+
+        let mut secret = [0u8; 32];
+        secret.copy_from_slice(&stored[..32]);
+        let identity = match DeviceIdentity::from_secret(secret) {
+            Ok(identity) => identity,
+            Err(error) => {
+                self.emit_error("crypto", &error);
+                return;
+            }
+        };
+        self.local_peer_id = identity.peer_id();
+        self.keys = SenderKeyManager::new(self.local_peer_id);
+        self.device_identity = Some(identity);
+
+        let Ok(display_name) = std::str::from_utf8(&stored[32..]) else {
+            self.emit_error_message("crypto", "stored profile name is invalid".into());
+            return;
+        };
+        if display_name.is_empty() {
+            return;
+        }
+        let public = self.device_identity.as_ref().expect("identity restored").public();
+        match LocalProfile::new(display_name, public, self.clock.now()) {
+            Ok(profile) => {
+                self.config.display_name = profile.display_name.clone();
+                self.profile = Some(profile.clone());
+                self.sink.emit(Event::ProfileReady { profile });
+            }
+            Err(error) => self.emit_error_message("identity", error.to_string()),
+        }
+    }
+
+    fn persist_profile(&self) -> crate::Result<()> {
+        let identity = self
+            .device_identity
+            .as_ref()
+            .ok_or_else(|| crate::CryptoError::KeyStorage("identity not initialized".into()))?;
+        let profile = self
+            .profile
+            .as_ref()
+            .ok_or_else(|| crate::CryptoError::KeyStorage("profile not initialized".into()))?;
+        let mut stored = identity.secret_bytes().to_vec();
+        stored.extend_from_slice(profile.display_name.as_bytes());
+        self.platform.store_identity(&stored)
     }
 
     /// Publish the smallest useful, explicitly untrusted discovery record.
@@ -873,6 +968,9 @@ impl Engine {
             }
 
             PlatformEvent::LifecycleChanged { foreground } => {
+                if foreground && self.profile.is_none() {
+                    self.restore_profile();
+                }
                 tracing::info!(foreground, "lifecycle changed");
             }
         }

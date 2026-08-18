@@ -7,6 +7,7 @@ import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.util.Base64
 import android.util.Log
 import java.util.UUID
 
@@ -160,7 +161,7 @@ class LanAdapter(
             serviceName = this@LanAdapter.serviceName
             serviceType = SERVICE_TYPE
             port = DEFAULT_PORT
-            setAttribute(TXT_KEY, payload)
+            setAttribute(TXT_KEY, Base64.encodeToString(payload, Base64.NO_WRAP))
         }
         val listener = object : NsdManager.RegistrationListener {
             override fun onServiceRegistered(service: NsdServiceInfo) {
@@ -216,7 +217,12 @@ class LanAdapter(
                 }
 
                 override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
-                    val payload = serviceInfo.attributes[TXT_KEY] ?: return
+                    val encodedPayload = serviceInfo.attributes[TXT_KEY] ?: return
+                    val payload = try {
+                        Base64.decode(encodedPayload.toString(Charsets.UTF_8), Base64.NO_WRAP)
+                    } catch (_: IllegalArgumentException) {
+                        return
+                    }
                     val host = serviceInfo.host?.hostAddress ?: return
                     synchronized(visibleHandles) { visibleHandles.add(serviceInfo.serviceName) }
                     emit(

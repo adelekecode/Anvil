@@ -54,6 +54,8 @@ use anvil_core::{
 
 #[cfg(target_os = "android")]
 mod android_platform;
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+mod apple_platform;
 mod convert;
 mod platform_bridge;
 
@@ -296,6 +298,9 @@ pub unsafe extern "system" fn Java_dev_anvil_AnvilPlatform_nativeAttach(
         let object = env.new_global_ref(this).map_err(|_| ANVIL_ERR_INVALID_ARG)?;
         let session = unsafe { &*(session as *const AnvilSession) };
         session.platform.attach(Arc::new(android_platform::AndroidPlatform::new(vm, object)));
+        let _ = session
+            .handle
+            .platform(anvil_core::PlatformEvent::LifecycleChanged { foreground: true });
         Ok::<_, c_int>(ANVIL_OK)
     }));
     result.unwrap_or(Err(ANVIL_ERR_PANIC)).unwrap_or_else(|code| code)
@@ -314,6 +319,49 @@ pub unsafe extern "system" fn Java_dev_anvil_AnvilPlatform_nativeDetach(
     }
     let _ = std::panic::catch_unwind(|| {
         let session = unsafe { &*(session as *const AnvilSession) };
+        session.platform.detach();
+    });
+}
+
+/// Attach Swift callbacks to an already-running session.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+#[no_mangle]
+pub unsafe extern "C" fn anvil_attach_platform(
+    session: *mut AnvilSession,
+    callbacks: *const apple_platform::AnvilPlatformCallbacks,
+) -> c_int {
+    if session.is_null() || callbacks.is_null() {
+        return ANVIL_ERR_INVALID_ARG;
+    }
+    let result = std::panic::catch_unwind(|| {
+        let session = unsafe { &*session };
+        let callbacks = unsafe { *callbacks };
+        if callbacks.context.is_null()
+            || callbacks.capabilities.is_none()
+            || callbacks.invoke.is_none()
+            || callbacks.load_identity.is_none()
+            || callbacks.release.is_none()
+        {
+            return ANVIL_ERR_INVALID_ARG;
+        }
+        session.platform.attach(Arc::new(apple_platform::ApplePlatform::new(callbacks)));
+        let _ = session
+            .handle
+            .platform(anvil_core::PlatformEvent::LifecycleChanged { foreground: true });
+        ANVIL_OK
+    });
+    result.unwrap_or(ANVIL_ERR_PANIC)
+}
+
+/// Detach Swift callbacks before the Flutter engine releases its platform host.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+#[no_mangle]
+pub unsafe extern "C" fn anvil_detach_platform(session: *mut AnvilSession) {
+    if session.is_null() {
+        return;
+    }
+    let _ = std::panic::catch_unwind(|| {
+        let session = unsafe { &*session };
         session.platform.detach();
     });
 }

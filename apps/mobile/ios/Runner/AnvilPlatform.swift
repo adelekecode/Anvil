@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 
 /// The iOS side of the platform boundary (§10, §90).
 ///
@@ -24,17 +25,57 @@ final class AnvilPlatform {
     private var sessionPtr: UnsafeMutableRawPointer?
 
     func attach(sessionPtr: UnsafeMutableRawPointer) {
+        let retained = Unmanaged.passRetained(self).toOpaque()
+        var callbacks = AnvilPlatformCallbacks(
+            context: retained,
+            capabilities: { context in
+                guard let context else { return 0 }
+                return Unmanaged<AnvilPlatform>.fromOpaque(context)
+                    .takeUnretainedValue().capabilitiesMask()
+            },
+            invoke: { context, operation, argument, bytes, length, text in
+                guard let context, let operation else { return -1 }
+                let platform = Unmanaged<AnvilPlatform>.fromOpaque(context).takeUnretainedValue()
+                let data = bytes.map { Data(bytes: $0, count: length) } ?? Data()
+                return platform.invoke(
+                    operation: String(cString: operation),
+                    argument: argument,
+                    data: data,
+                    text: text.map(String.init(cString:))
+                )
+            },
+            load_identity: { context, buffer, capacity in
+                guard context != nil, let data = AnvilKeyStore.loadIdentity() else { return 0 }
+                guard let buffer else { return data.count }
+                guard capacity >= data.count else { return -1 }
+                data.copyBytes(to: buffer, count: data.count)
+                return data.count
+            },
+            release: { context in
+                guard let context else { return }
+                Unmanaged<AnvilPlatform>.fromOpaque(context).release()
+            }
+        )
+        let result = anvil_attach_platform(sessionPtr, &callbacks)
+        if result != 0 {
+            Unmanaged<AnvilPlatform>.fromOpaque(retained).release()
+            NSLog("Anvil: Rust rejected Apple platform attachment: \(result)")
+            return
+        }
         self.sessionPtr = sessionPtr
         lifecycle.start()
     }
 
     func detach() {
+        let session = sessionPtr
         lifecycle.stop()
         lan.stopDiscovery()
+        lan.stopAdvertising()
         aware.stopDiscovery()
         audio.stopCapture()
         audio.stopPlayback()
         sessionPtr = nil
+        if let session { anvil_detach_platform(session) }
     }
 
     /// What this device can do right now.
@@ -49,6 +90,15 @@ final class AnvilPlatform {
             nearbyDevices: lan.hasLocalNetworkPermission(),
             secureKeyStorage: AnvilKeyStore.hasSecureEnclave()
         )
+    }
+
+    private func capabilitiesMask() -> UInt32 {
+        let value = capabilities()
+        return (value.lan ? 1 : 0)
+            | (value.wifiAware ? 2 : 0)
+            | (value.microphone ? 4 : 0)
+            | (value.nearbyDevices ? 8 : 0)
+            | (value.secureKeyStorage ? 16 : 0)
     }
 
     // MARK: - Calls from the core
@@ -76,6 +126,64 @@ final class AnvilPlatform {
         }
     }
 
+    private func invoke(
+        operation: String,
+        argument: UInt64,
+        data: Data,
+        text: String?
+    ) -> Int32 {
+        switch operation {
+        case "startLanDiscovery": startLanDiscovery()
+        case "stopLanDiscovery": stopLanDiscovery()
+        case "startAwareDiscovery": startAwareDiscovery()
+        case "stopAwareDiscovery": stopAwareDiscovery()
+        case "advertise": advertise(payload: data)
+        case "stopAdvertising": stopAdvertising()
+        case "connectLan": connect(pathId: argument, kind: "lan", address: text ?? "")
+        case "connectAware": connect(pathId: argument, kind: "wifi-aware", address: text ?? "")
+        case "startCapture":
+            let parts = (text ?? "1,20").split(separator: ",").compactMap { Int($0) }
+            audio.startCapture(
+                sampleRateHz: Int(argument),
+                channels: parts.first ?? 1,
+                frameMillis: parts.dropFirst().first ?? 20
+            )
+        case "stopCapture": audio.stopCapture()
+        case "startPlayback":
+            audio.startPlayback(sampleRateHz: Int(argument), channels: Int(text ?? "1") ?? 1)
+        case "stopPlayback": audio.stopPlayback()
+        case "play":
+            let samples = data.withUnsafeBytes { raw -> [Int16] in
+                Array(raw.bindMemory(to: Int16.self))
+            }
+            audio.play(samples)
+        case "storeIdentity": AnvilKeyStore.storeIdentity(data)
+        case "clearIdentity": AnvilKeyStore.clearIdentity()
+        case "requestPermission": requestPermission(text ?? "")
+        case "listen": break // NWListener is established by advertise().
+        default:
+            NSLog("Anvil: unsupported native operation \(operation)")
+            return -2
+        }
+        return 0
+    }
+
+    private func requestPermission(_ capability: String) {
+        switch capability {
+        case "microphone":
+            AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
+                self?.emit(.permissionChanged(capability: capability, granted: granted))
+            }
+        case "nearby_devices":
+            // iOS exposes no explicit local-network permission API. Starting a
+            // declared Bonjour browse is the system-supported prompt trigger.
+            startLanDiscovery()
+            emit(.permissionChanged(capability: capability, granted: true))
+        default:
+            emit(.permissionChanged(capability: capability, granted: false))
+        }
+    }
+
     // MARK: - Events to the core
 
     private func emit(_ event: PlatformEvent) {
@@ -97,10 +205,3 @@ struct Capabilities {
     let nearbyDevices: Bool
     let secureKeyStorage: Bool
 }
-
-/// Declared in the Rust static library. PHASE1.
-@_silgen_name("anvil_submit_platform_event")
-func anvil_submit_platform_event(
-    _ session: UnsafeMutableRawPointer,
-    _ json: UnsafePointer<CChar>
-) -> Int32

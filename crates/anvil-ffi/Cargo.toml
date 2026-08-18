@@ -12,7 +12,7 @@ license.workspace = true
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-default = []
+default = ["crypto"]
 crypto = ["anvil-core/crypto"]
 quic = ["anvil-core/quic"]
 opus = ["anvil-core/opus"]

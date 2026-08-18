@@ -149,9 +149,9 @@ class AnvilPlatform(private val context: Context) {
         else -> error("unknown path kind $kind")
     }
 
-    fun loadIdentity(): ByteArray? = KeyStore.loadIdentity()
-    fun storeIdentity(bytes: ByteArray) = KeyStore.storeIdentity(bytes)
-    fun clearIdentity() = KeyStore.clearIdentity()
+    fun loadIdentity(): ByteArray? = KeyStore.loadIdentity(context)
+    fun storeIdentity(bytes: ByteArray) = KeyStore.storeIdentity(context, bytes)
+    fun clearIdentity() = KeyStore.clearIdentity(context)
 
     fun requestPermission(capability: String) {
         val activity = context as? ComponentActivity

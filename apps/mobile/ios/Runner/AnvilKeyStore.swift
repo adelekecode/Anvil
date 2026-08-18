@@ -22,19 +22,56 @@ import Security
 enum AnvilKeyStore {
 
     static func hasSecureEnclave() -> Bool {
-        LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
+        // The current implementation uses a this-device-only Keychain item.
+        // It is OS protected but not wrapped by an enclave-held key yet.
+        false
     }
 
     static func loadIdentity() -> Data? {
-        // PHASE2
-        nil
+        var query = baseQuery
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess else {
+            NSLog("Anvil: Keychain load failed: \(status)")
+            return nil
+        }
+        return result as? Data
     }
 
     static func storeIdentity(_ data: Data) {
-        // PHASE2
+        let update = [kSecValueData as String: data]
+        let status = SecItemUpdate(baseQuery as CFDictionary, update as CFDictionary)
+        if status == errSecSuccess { return }
+        if status != errSecItemNotFound {
+            NSLog("Anvil: Keychain update failed: \(status)")
+            return
+        }
+
+        var item = baseQuery
+        item[kSecValueData as String] = data
+        item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        let addStatus = SecItemAdd(item as CFDictionary, nil)
+        if addStatus != errSecSuccess {
+            NSLog("Anvil: Keychain add failed: \(addStatus)")
+        }
     }
 
     static func clearIdentity() {
-        // PHASE2
+        let status = SecItemDelete(baseQuery as CFDictionary)
+        if status != errSecSuccess && status != errSecItemNotFound {
+            NSLog("Anvil: Keychain delete failed: \(status)")
+        }
+    }
+
+    private static var baseQuery: [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "dev.anvil.identity",
+            kSecAttrAccount as String: "installation-v1",
+            kSecAttrSynchronizable as String: false,
+        ]
     }
 }

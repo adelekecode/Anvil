@@ -28,6 +28,10 @@
 	<true/>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Anvil discovers and connects to nearby people on your local network.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_anvil._udp</string>
+	</array>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Anvil uses the microphone for nearby encrypted voice conversations.</string>
 	<key>UIApplicationSceneManifest</key>

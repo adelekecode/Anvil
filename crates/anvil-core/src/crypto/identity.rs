@@ -17,7 +17,7 @@
 //! the same room and can see each other — and the UI should reflect that rather
 //! than implying a verified name means a verified person.
 
-use crate::{PeerId, Result};
+use crate::{CryptoError, PeerId, Result};
 
 use super::key_store::IdentityStore;
 
@@ -72,8 +72,19 @@ impl PublicIdentity {
     /// Verify a signature made by this identity.
     ///
     /// PHASE2.
-    pub fn verify(&self, _message: &[u8], _signature: &[u8; 64]) -> Result<()> {
-        Err(crate::Error::NotImplemented("crypto::identity::verify (Phase 2)"))
+    pub fn verify(&self, message: &[u8], signature: &[u8; 64]) -> Result<()> {
+        #[cfg(feature = "crypto")]
+        {
+            let key = ed25519_dalek::VerifyingKey::from_bytes(&self.key)
+                .map_err(|_| CryptoError::IdentityRejected)?;
+            let signature = ed25519_dalek::Signature::from_bytes(signature);
+            key.verify_strict(message, &signature).map_err(|_| CryptoError::IdentityRejected.into())
+        }
+        #[cfg(not(feature = "crypto"))]
+        {
+            let _ = (message, signature);
+            Err(crate::Error::NotImplemented("crypto feature disabled"))
+        }
     }
 }
 
@@ -90,11 +101,13 @@ impl core::fmt::Debug for PublicIdentity {
 /// somewhere it should not be.
 pub struct DeviceIdentity {
     public: PublicIdentity,
-    /// PHASE2: replaced by `ed25519_dalek::SigningKey`, which zeroizes on drop.
-    #[allow(dead_code)]
+    #[cfg(feature = "crypto")]
+    private: ed25519_dalek::SigningKey,
+    #[cfg(not(feature = "crypto"))]
     private: PrivateKeyPlaceholder,
 }
 
+#[cfg(not(feature = "crypto"))]
 #[derive(zeroize::ZeroizeOnDrop)]
 struct PrivateKeyPlaceholder([u8; 32]);
 
@@ -104,8 +117,50 @@ impl DeviceIdentity {
     /// PHASE2: real keygen and storage. Note the shape though — the store is
     /// injected rather than reached for, so a test can run the whole identity
     /// lifecycle without touching a Keychain.
-    pub fn load_or_generate(_store: &dyn IdentityStore) -> Result<Self> {
-        Err(crate::Error::NotImplemented("crypto::identity::load_or_generate (Phase 2)"))
+    pub fn load_or_generate(store: &dyn IdentityStore) -> Result<Self> {
+        if let Some(stored) = store.load()? {
+            if stored.len() < 32 {
+                return Err(CryptoError::KeyStorage("stored identity is truncated".into()).into());
+            }
+            let mut secret = [0u8; 32];
+            secret.copy_from_slice(&stored[..32]);
+            return Self::from_secret(secret);
+        }
+
+        let identity = Self::generate();
+        store.store(&identity.secret_bytes())?;
+        Ok(identity)
+    }
+
+    /// Restore an identity from its 32-byte Ed25519 seed.
+    pub fn from_secret(secret: [u8; 32]) -> Result<Self> {
+        #[cfg(feature = "crypto")]
+        {
+            let private = ed25519_dalek::SigningKey::from_bytes(&secret);
+            let public = PublicIdentity::new(private.verifying_key().to_bytes());
+            Ok(Self { public, private })
+        }
+        #[cfg(not(feature = "crypto"))]
+        {
+            Ok(Self { public: PublicIdentity::new(secret), private: PrivateKeyPlaceholder(secret) })
+        }
+    }
+
+    /// Generate a fresh installation identity with the operating-system RNG.
+    #[must_use]
+    pub fn generate() -> Self {
+        #[cfg(feature = "crypto")]
+        {
+            let private = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
+            let public = PublicIdentity::new(private.verifying_key().to_bytes());
+            Self { public, private }
+        }
+        #[cfg(not(feature = "crypto"))]
+        {
+            let mut secret = [0u8; 32];
+            rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut secret);
+            Self { public: PublicIdentity::new(secret), private: PrivateKeyPlaceholder(secret) }
+        }
     }
 
     /// This device's public identity.
@@ -123,8 +178,29 @@ impl DeviceIdentity {
     /// Sign a message.
     ///
     /// PHASE2.
-    pub fn sign(&self, _message: &[u8]) -> Result<[u8; 64]> {
-        Err(crate::Error::NotImplemented("crypto::identity::sign (Phase 2)"))
+    pub fn sign(&self, message: &[u8]) -> Result<[u8; 64]> {
+        #[cfg(feature = "crypto")]
+        {
+            use ed25519_dalek::Signer;
+            Ok(self.private.sign(message).to_bytes())
+        }
+        #[cfg(not(feature = "crypto"))]
+        {
+            let _ = message;
+            Err(crate::Error::NotImplemented("crypto feature disabled"))
+        }
+    }
+
+    /// Seed bytes for the platform keystore. Never expose across the UI FFI.
+    pub(crate) fn secret_bytes(&self) -> [u8; 32] {
+        #[cfg(feature = "crypto")]
+        {
+            self.private.to_bytes()
+        }
+        #[cfg(not(feature = "crypto"))]
+        {
+            self.private.0
+        }
     }
 }
 
