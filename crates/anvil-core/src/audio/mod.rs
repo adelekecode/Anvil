@@ -21,10 +21,16 @@
 //! each submodule.
 
 pub mod codec;
+#[cfg(feature = "desktop")]
+pub mod desktop;
 pub mod frame;
 pub mod jitter;
 pub mod mixer;
 pub mod opus;
+#[cfg(feature = "opus")]
+pub mod pipeline;
+pub mod resampler;
+pub mod ring_buffer;
 pub mod vad;
 
 pub use codec::{Decoder, Encoder, NullDecoder, NullEncoder};
@@ -37,3 +43,11 @@ pub use vad::VoiceActivityDetector;
 pub use opus::{
     DecodedAudioFrame, EncodedAudioFrame, OpusConfig, OpusVoiceDecoder, OpusVoiceEncoder,
 };
+pub use resampler::{AudioResampler, TARGET_FRAME_SAMPLES, TARGET_SAMPLE_RATE};
+pub use ring_buffer::PcmRingBuffer;
+
+#[cfg(feature = "opus")]
+pub use pipeline::{CapturePipeline, PlaybackPipeline};
+
+#[cfg(feature = "desktop")]
+pub use desktop::CpalLoop;
