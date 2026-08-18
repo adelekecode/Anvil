@@ -15,6 +15,9 @@ crypto = ["dep:ed25519-dalek", "dep:x25519-dalek", "dep:chacha20poly1305", "dep:
 quic = ["dep:quinn", "dep:rustls"]
 # Opus encode/decode. Requires a C toolchain for libopus. Phase 1.
 opus = ["dep:audiopus"]
+# Desktop audio I/O via CPAL + the capture/playback pipeline. Does not
+# compile on Android / iOS; the real app uses its own native adapters.
+desktop = ["dep:cpal", "opus"]
 
 [dependencies]
 thiserror.workspace = true
@@ -31,6 +34,7 @@ sha2 = { workspace = true, optional = true }
 quinn = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 audiopus = { workspace = true, optional = true }
+cpal = { version = "0.15", optional = true }
 
 [lints.rust]
 missing_debug_implementations = "warn"

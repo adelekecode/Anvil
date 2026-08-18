@@ -32,3 +32,8 @@ pub use frame::{samples_per_frame, EncodedFrame, PcmFrame};
 pub use jitter::{JitterBuffer, Playout};
 pub use mixer::Mixer;
 pub use vad::VoiceActivityDetector;
+
+#[cfg(feature = "opus")]
+pub use opus::{
+    DecodedAudioFrame, EncodedAudioFrame, OpusConfig, OpusVoiceDecoder, OpusVoiceEncoder,
+};

@@ -575,12 +575,8 @@ impl Engine {
         // bits, and room ids appear in packet headers.
         let identity = RoomIdentity::generate();
         let admission = crate::room::AdmissionPolicy::JoinCode { code: identity.join_code.raw() };
-        let mut room = RoomState::create(
-            self.local_peer_id,
-            self.config.display_name.clone(),
-            admission,
-            now,
-        );
+        let mut room =
+            RoomState::create(self.local_peer_id, self.config.display_name.clone(), admission, now);
         room.room_id = identity.room_id;
 
         let room_id = room.room_id;
@@ -1031,7 +1027,8 @@ impl Engine {
         // `credential` is consumed only by the crypto path; the no-crypto
         // build just reports that joining a room needs the feature.
         #[cfg_attr(not(feature = "crypto"), allow(unused_variables))]
-        let Some(code) = credential else {
+        let Some(code) = credential
+        else {
             self.emit_error_message(
                 "room",
                 "joining by room id requires a credential in Phase 2".to_string(),
@@ -1062,7 +1059,8 @@ impl Engine {
             };
             self.pending_join_code = JoinCode::parse(&code_string);
 
-            match self.send_control(host, crate::crypto::AppControl::RoomJoin { code: code_string }) {
+            match self.send_control(host, crate::crypto::AppControl::RoomJoin { code: code_string })
+            {
                 Ok(()) => {
                     let _ = room_id;
                 }
@@ -1420,7 +1418,8 @@ impl Engine {
         if room.admission.needs_user_approval() {
             // Defer to the user. Stash the request so RespondToJoin can resolve it,
             // and surface it on the host's UI. Re-asking just updates the name.
-            let pending = PendingJoin { display_name: display_name.clone(), requested_at: self.clock.now() };
+            let pending =
+                PendingJoin { display_name: display_name.clone(), requested_at: self.clock.now() };
             self.pending_join_requests.insert(peer, pending);
             self.sink.emit(Event::JoinRequested { peer_id: peer, display_name });
             return;
@@ -1438,10 +1437,7 @@ impl Engine {
     #[cfg(feature = "crypto")]
     fn respond_to_join(&mut self, peer: PeerId, accept: bool) {
         let Some(pending) = self.pending_join_requests.remove(&peer) else {
-            self.emit_error_message(
-                "room",
-                format!("no pending join request from {peer}"),
-            );
+            self.emit_error_message("room", format!("no pending join request from {peer}"));
             return;
         };
         if accept {
@@ -1468,7 +1464,8 @@ impl Engine {
             if room.participant(peer).is_some() {
                 let epoch = room.epoch.0;
                 let room_id = *room.room_id.as_bytes();
-                let _ = self.send_control(peer, crate::crypto::AppControl::RoomAccept { room_id, epoch });
+                let _ = self
+                    .send_control(peer, crate::crypto::AppControl::RoomAccept { room_id, epoch });
                 return;
             }
 
@@ -1498,23 +1495,13 @@ impl Engine {
         if self.keys.rotate(new_epoch, &members).is_ok() {
             let _ = self.send_control(
                 peer,
-                crate::crypto::AppControl::MediaKey {
-                    epoch: new_epoch.0,
-                    key,
-                    salt,
-                },
+                crate::crypto::AppControl::MediaKey { epoch: new_epoch.0, key, salt },
             );
         }
     }
 
     #[cfg(feature = "crypto")]
-    fn handle_media_key(
-        &mut self,
-        peer: PeerId,
-        epoch: u64,
-        key: [u8; 32],
-        salt: [u8; 12],
-    ) {
+    fn handle_media_key(&mut self, peer: PeerId, epoch: u64, key: [u8; 32], salt: [u8; 12]) {
         // Install whatever they sent. We don't gate on "is this the epoch I
         // expected?" — the key is for a specific epoch and our epoch manager
         // already rejects decryption under epochs we do not accept.
@@ -1535,7 +1522,11 @@ impl Engine {
             .unwrap_or_else(|| "Room host".into());
         let room_id = RoomId(room_bytes);
         let participants = vec![
-            crate::room::Participant::new(self.local_peer_id, profile.display_name.clone(), self.clock.now()),
+            crate::room::Participant::new(
+                self.local_peer_id,
+                profile.display_name.clone(),
+                self.clock.now(),
+            ),
             crate::room::Participant::new(host, host_name, self.clock.now()),
         ];
         let room = RoomState::joined(
@@ -1553,13 +1544,12 @@ impl Engine {
         // The host will already have generated its own key and pushed it down
         // in the same epoch; the matching salt+key pair is what makes
         // decryption succeed for our outgoing traffic.
-        let members: Vec<PeerId> = self.room.as_ref().unwrap().participants.keys().copied().collect();
+        let members: Vec<PeerId> =
+            self.room.as_ref().unwrap().participants.keys().copied().collect();
         if self.keys.rotate(crate::Epoch(epoch), &members).is_ok() {
             let (key, salt) = self.keys.own_key_for_epoch(crate::Epoch(epoch));
-            let _ = self.send_control(
-                host,
-                crate::crypto::AppControl::MediaKey { epoch, key, salt },
-            );
+            let _ =
+                self.send_control(host, crate::crypto::AppControl::MediaKey { epoch, key, salt });
         }
 
         self.sink.emit(Event::RoomJoined {
@@ -2018,9 +2008,7 @@ mod tests {
         engine.transport.on_established(path, 1_200, now);
         // The session key here is a test fixture; the engine only uses it to
         // seal/open control records, and the test seals with the same key.
-        engine
-            .secure_control
-            .insert(path, crate::crypto::SecureControl::new([0xAB; 32]));
+        engine.secure_control.insert(path, crate::crypto::SecureControl::new([0xAB; 32]));
         path
     }
 
@@ -2119,7 +2107,9 @@ mod tests {
         for _ in 0..3 {
             engine.handle_command(Command::Platform(PlatformEvent::ReliableReceived {
                 path,
-                data: encode_app_control(crate::crypto::AppControl::RoomJoin { code: code.clone() }),
+                data: encode_app_control(crate::crypto::AppControl::RoomJoin {
+                    code: code.clone(),
+                }),
             }));
         }
 
@@ -2147,7 +2137,10 @@ mod tests {
         // A second room is rejected, but so should a JoinRoom with no
         // credential — the Phase 2 wire only carries the code, not the id.
         let before = _sink.len();
-        engine.handle_command(Command::JoinRoom { room_id: crate::RoomId::generate(), credential: None });
+        engine.handle_command(Command::JoinRoom {
+            room_id: crate::RoomId::generate(),
+            credential: None,
+        });
         assert!(_sink.events()[before..]
             .iter()
             .any(|e| matches!(e, Event::Error { layer: "room", .. })));
@@ -2182,8 +2175,7 @@ mod tests {
         // The host's key manager now knows the joiner for the new epoch.
         let epoch = engine.room().unwrap().epoch;
         assert!(
-            engine.keys.can_decrypt(peer(2))
-                || engine.keys.epoch() == epoch,
+            engine.keys.can_decrypt(peer(2)) || engine.keys.epoch() == epoch,
             "host advanced epoch to {epoch:?} ({}); known members = {:?}",
             engine.keys.epoch(),
             engine.keys.known_members(),

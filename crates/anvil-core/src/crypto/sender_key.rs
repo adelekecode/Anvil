@@ -151,10 +151,7 @@ impl GroupKeyManager for SenderKeyManager {
         use chacha20poly1305::aead::{Aead, KeyInit, Payload};
         let header = crate::protocol::MediaHeader::decode(associated_data)?;
         let epoch = Epoch(u64::from(header.epoch));
-        let key = self
-            .own_keys
-            .get(&epoch)
-            .ok_or(CryptoError::UnknownEpoch(epoch))?;
+        let key = self.own_keys.get(&epoch).ok_or(CryptoError::UnknownEpoch(epoch))?;
         let cipher = chacha20poly1305::ChaCha20Poly1305::new(key.bytes().into());
         cipher
             .encrypt(
@@ -189,11 +186,7 @@ impl GroupKeyManager for SenderKeyManager {
         let cipher = chacha20poly1305::ChaCha20Poly1305::new(key.bytes().into());
         let plaintext = cipher
             .decrypt(
-                chacha20poly1305::Nonce::from_slice(&key.nonce(
-                    epoch,
-                    header.stream_id,
-                    sequence,
-                )),
+                chacha20poly1305::Nonce::from_slice(&key.nonce(epoch, header.stream_id, sequence)),
                 Payload { msg: ciphertext, aad: associated_data },
             )
             .map_err(|_| CryptoError::AuthenticationFailed)?;

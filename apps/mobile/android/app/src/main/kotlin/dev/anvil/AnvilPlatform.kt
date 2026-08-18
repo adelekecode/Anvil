@@ -1,10 +1,10 @@
 package dev.anvil
 
+import android.app.Activity
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Log
-import androidx.activity.ComponentActivity
 import androidx.core.app.ActivityCompat
 
 /**
@@ -154,8 +154,17 @@ class AnvilPlatform(private val context: Context) {
     fun clearIdentity() = KeyStore.clearIdentity(context)
 
     fun requestPermission(capability: String) {
-        val activity = context as? ComponentActivity
+        // MUST be android.app.Activity, not androidx ComponentActivity.
+        //
+        // FlutterActivity extends android.app.Activity directly — it is *not* a
+        // ComponentActivity. Casting to ComponentActivity therefore always
+        // failed here, so this method silently reported "denied" and never
+        // showed a dialog: on Android the app could never ask for the
+        // microphone or nearby-devices permission at all. ActivityCompat only
+        // needs an Activity anyway.
+        val activity = context as? Activity
         if (activity == null) {
+            Log.w(TAG, "cannot request $capability: context is not an Activity")
             emit(PlatformEvent.PermissionChanged(capability, false))
             return
         }

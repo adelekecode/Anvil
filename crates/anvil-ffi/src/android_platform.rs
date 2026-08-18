@@ -5,7 +5,7 @@ use anvil_core::platform::{
 use anvil_core::transport::{Endpoint, PathKind};
 use anvil_core::{AudioConfig, PathId, PlatformAdapter, PlatformError, Result};
 use jni::objects::{GlobalRef, JByteArray, JObject, JShortArray, JString, JValue};
-use jni::{AttachGuard, JavaVM};
+use jni::{AttachGuard, JNIEnv, JavaVM};
 
 pub(crate) struct AndroidPlatform {
     vm: JavaVM,
@@ -18,16 +18,24 @@ impl AndroidPlatform {
     }
 
     fn env(&self) -> Result<AttachGuard<'_>> {
-        self.vm
+        let mut guard = self
+            .vm
             .attach_current_thread()
-            .map_err(|error| PlatformError::Adapter(error.to_string()).into())
+            .map_err(|error| PlatformError::Adapter(error.to_string()))?;
+
+        // Safety net. If an earlier call left an exception pending — a path this
+        // code tries hard not to take, but cannot prove it never does — clearing
+        // it here turns a process abort into a logged error.
+        if let Some(detail) = drain_exception(&mut guard) {
+            tracing::warn!(%detail, "cleared a Java exception left pending by an earlier call");
+        }
+        Ok(guard)
     }
 
     fn call_void(&self, name: &str, signature: &str, args: &[JValue<'_, '_>]) -> Result<()> {
         let mut env = self.env()?;
-        env.call_method(self.object.as_obj(), name, signature, args)
-            .map(|_| ())
-            .map_err(|error| PlatformError::Adapter(format!("Android {name}: {error}")).into())
+        let result = env.call_method(self.object.as_obj(), name, signature, args);
+        finish(&mut env, name, result).map(|_| ())
     }
 
     fn bytes(&self, bytes: &[u8]) -> Result<(AttachGuard<'_>, JByteArray<'_>)> {
@@ -68,9 +76,9 @@ impl DiscoveryAdapter for AndroidPlatform {
     fn advertise(&self, payload: &[u8]) -> Result<()> {
         let (mut env, array) = self.bytes(payload)?;
         let object = JObject::from(array);
-        env.call_method(self.object.as_obj(), "advertise", "([B)V", &[JValue::Object(&object)])
-            .map(|_| ())
-            .map_err(|error| PlatformError::Adapter(format!("Android advertise: {error}")).into())
+        let result =
+            env.call_method(self.object.as_obj(), "advertise", "([B)V", &[JValue::Object(&object)]);
+        finish(&mut env, "advertise", result).map(|_| ())
     }
     fn stop_advertising(&self) -> Result<()> {
         self.call_void("stopAdvertising", "()V", &[])
@@ -84,7 +92,7 @@ impl TransportAdapter for AndroidPlatform {
         let address = env.new_string(&endpoint.address).map_err(adapter_error)?;
         let kind_object = JObject::from(kind);
         let address_object = JObject::from(address);
-        env.call_method(
+        let result = env.call_method(
             self.object.as_obj(),
             "connect",
             "(JLjava/lang/String;Ljava/lang/String;)V",
@@ -93,9 +101,8 @@ impl TransportAdapter for AndroidPlatform {
                 JValue::Object(&kind_object),
                 JValue::Object(&address_object),
             ],
-        )
-        .map(|_| ())
-        .map_err(|error| PlatformError::Adapter(format!("Android connect: {error}")).into())
+        );
+        finish(&mut env, "connect", result).map(|_| ())
     }
 
     fn close(&self, path: PathId) -> Result<()> {
@@ -114,16 +121,13 @@ impl TransportAdapter for AndroidPlatform {
         let mut env = self.env()?;
         let kind_string = env.new_string(Self::kind(kind)).map_err(adapter_error)?;
         let kind_object = JObject::from(kind_string);
-        let value = env
-            .call_method(
-                self.object.as_obj(),
-                "listen",
-                "(Ljava/lang/String;)Ljava/lang/String;",
-                &[JValue::Object(&kind_object)],
-            )
-            .map_err(adapter_error)?
-            .l()
-            .map_err(adapter_error)?;
+        let result = env.call_method(
+            self.object.as_obj(),
+            "listen",
+            "(Ljava/lang/String;)Ljava/lang/String;",
+            &[JValue::Object(&kind_object)],
+        );
+        let value = finish(&mut env, "listen", result)?.l().map_err(adapter_error)?;
         if value.is_null() {
             return Err(PlatformError::Adapter("Android listen returned null".into()).into());
         }
@@ -137,14 +141,13 @@ impl AndroidPlatform {
     fn send_bytes(&self, method: &str, path: PathId, data: &[u8]) -> Result<()> {
         let (mut env, array) = self.bytes(data)?;
         let object = JObject::from(array);
-        env.call_method(
+        let result = env.call_method(
             self.object.as_obj(),
             method,
             "(J[B)V",
             &[JValue::Long(path.0 as i64), JValue::Object(&object)],
-        )
-        .map(|_| ())
-        .map_err(|error| PlatformError::Adapter(format!("Android {method}: {error}")).into())
+        );
+        finish(&mut env, method, result).map(|_| ())
     }
 }
 
@@ -179,20 +182,17 @@ impl AudioAdapter for AndroidPlatform {
             env.new_short_array(frame.samples.len() as i32).map_err(adapter_error)?;
         env.set_short_array_region(&array, 0, &frame.samples).map_err(adapter_error)?;
         let object = JObject::from(array);
-        env.call_method(self.object.as_obj(), "play", "([S)V", &[JValue::Object(&object)])
-            .map(|_| ())
-            .map_err(adapter_error)
+        let result =
+            env.call_method(self.object.as_obj(), "play", "([S)V", &[JValue::Object(&object)]);
+        finish(&mut env, "play", result).map(|_| ())
     }
 }
 
 impl KeyStoreAdapter for AndroidPlatform {
     fn load_identity(&self) -> Result<Option<Vec<u8>>> {
         let mut env = self.env()?;
-        let value = env
-            .call_method(self.object.as_obj(), "loadIdentity", "()[B", &[])
-            .map_err(adapter_error)?
-            .l()
-            .map_err(adapter_error)?;
+        let result = env.call_method(self.object.as_obj(), "loadIdentity", "()[B", &[]);
+        let value = finish(&mut env, "loadIdentity", result)?.l().map_err(adapter_error)?;
         if value.is_null() {
             return Ok(None);
         }
@@ -202,9 +202,13 @@ impl KeyStoreAdapter for AndroidPlatform {
     fn store_identity(&self, bytes: &[u8]) -> Result<()> {
         let (mut env, array) = self.bytes(bytes)?;
         let object = JObject::from(array);
-        env.call_method(self.object.as_obj(), "storeIdentity", "([B)V", &[JValue::Object(&object)])
-            .map(|_| ())
-            .map_err(adapter_error)
+        let result = env.call_method(
+            self.object.as_obj(),
+            "storeIdentity",
+            "([B)V",
+            &[JValue::Object(&object)],
+        );
+        finish(&mut env, "storeIdentity", result).map(|_| ())
     }
     fn clear_identity(&self) -> Result<()> {
         self.call_void("clearIdentity", "()V", &[])
@@ -216,8 +220,8 @@ impl PlatformAdapter for AndroidPlatform {
         let Ok(mut env) = self.env() else {
             return Capabilities::default();
         };
-        let Ok(value) = env.call_method(self.object.as_obj(), "capabilitiesMask", "()I", &[])
-        else {
+        let result = env.call_method(self.object.as_obj(), "capabilitiesMask", "()I", &[]);
+        let Ok(value) = finish(&mut env, "capabilitiesMask", result) else {
             return Capabilities::default();
         };
         let Ok(mask) = value.i() else {
@@ -236,17 +240,79 @@ impl PlatformAdapter for AndroidPlatform {
         let mut env = self.env()?;
         let capability = env.new_string(capability).map_err(adapter_error)?;
         let object = JObject::from(capability);
-        env.call_method(
+        let result = env.call_method(
             self.object.as_obj(),
             "requestPermission",
             "(Ljava/lang/String;)V",
             &[JValue::Object(&object)],
-        )
-        .map(|_| ())
-        .map_err(adapter_error)
+        );
+        finish(&mut env, "requestPermission", result).map(|_| ())
     }
 }
 
 fn adapter_error(error: jni::errors::Error) -> anvil_core::Error {
     PlatformError::Adapter(error.to_string()).into()
+}
+
+/// Complete a JNI call, guaranteeing no Java exception is left pending.
+///
+/// **This is not optional bookkeeping — omitting it crashes the process.**
+///
+/// When a Java method invoked over JNI throws, the exception stays *pending on
+/// the calling thread*. The `jni` crate surfaces `Err(JavaException)` but
+/// deliberately does not clear it, because only the caller knows whether it
+/// wants to inspect it. ART then aborts the entire process on the *next* JNI
+/// call made from that thread:
+///
+/// ```text
+/// JNI DETECTED ERROR IN APPLICATION: JNI CallVoidMethodA called with
+/// pending exception java.lang.IllegalArgumentException
+/// ```
+///
+/// The abort is a SIGABRT with no Dart stack trace and no Rust backtrace, and
+/// it lands at whichever call site happened to come next — not the one that
+/// threw. That displacement is what makes this class of bug so hard to read
+/// from a crash report, and why every call site funnels through here.
+fn finish<T>(env: &mut JNIEnv<'_>, method: &str, result: jni::errors::Result<T>) -> Result<T> {
+    match result {
+        // A call can return Ok and still leave an exception pending if one was
+        // raised while marshalling arguments, so check on both paths.
+        Ok(value) => match drain_exception(env) {
+            None => Ok(value),
+            Some(detail) => {
+                Err(PlatformError::Adapter(format!("Android {method}: {detail}")).into())
+            }
+        },
+        Err(error) => {
+            let detail = drain_exception(env).unwrap_or_else(|| error.to_string());
+            Err(PlatformError::Adapter(format!("Android {method}: {detail}")).into())
+        }
+    }
+}
+
+/// Clear a pending Java exception, returning a description of it.
+///
+/// `exception_describe` writes the Java stack trace to logcat, which is the
+/// only place the original throw is visible — the Rust error carries just the
+/// summary line.
+fn drain_exception(env: &mut JNIEnv<'_>) -> Option<String> {
+    if !env.exception_check().unwrap_or(false) {
+        return None;
+    }
+
+    let throwable = env.exception_occurred().ok();
+    let _ = env.exception_describe();
+    // Must happen before any further JNI call, including the toString() below.
+    let _ = env.exception_clear();
+
+    let throwable = throwable?;
+    let described = env.call_method(&throwable, "toString", "()Ljava/lang/String;", &[]);
+    // toString() can itself throw; never leave one pending.
+    let _ = env.exception_clear();
+
+    let object = described.ok()?.l().ok()?;
+    if object.is_null() {
+        return None;
+    }
+    env.get_string(&JString::from(object)).ok().map(Into::into)
 }

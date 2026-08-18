@@ -163,8 +163,7 @@ impl JoinCode {
             let hk = Hkdf::<Sha256>::new(None, &self.chars);
             let info = b"anvil-room-token/v1";
             let mut okm = [0u8; 4];
-            hk.expand(info, &mut okm)
-                .expect("4-byte expand is always within HKDF limits");
+            hk.expand(info, &mut okm).expect("4-byte expand is always within HKDF limits");
             u32::from_be_bytes(okm)
         }
         #[cfg(not(feature = "crypto"))]

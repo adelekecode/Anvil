@@ -778,17 +778,12 @@ mod tests {
     #[test]
     fn join_requested_and_denied_events_carry_their_fields() {
         let peer = anvil_core::PeerId([0x88; 32]);
-        let requested = event_to_json(&Event::JoinRequested {
-            peer_id: peer,
-            display_name: "Bob".into(),
-        });
+        let requested =
+            event_to_json(&Event::JoinRequested { peer_id: peer, display_name: "Bob".into() });
         let value: Value = serde_json::from_str(&requested).unwrap();
         assert_eq!(value["type"], "joinRequested");
         assert_eq!(value["displayName"], "Bob");
-        assert_eq!(
-            value["peerId"],
-            anvil_core::identity::peer_id_string(peer)
-        );
+        assert_eq!(value["peerId"], anvil_core::identity::peer_id_string(peer));
 
         let denied = event_to_json(&Event::JoinDenied { peer_id: peer });
         let value: Value = serde_json::from_str(&denied).unwrap();

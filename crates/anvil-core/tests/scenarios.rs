@@ -93,7 +93,8 @@ fn losing_the_router_mid_call_does_not_disturb_the_room() {
 #[test]
 fn losing_the_relay_elects_a_new_one_without_rekeying() {
     let config = RelayConfig::default();
-    let mut room = RoomState::create(peer(1), "Alice".into(), AdmissionPolicy::Open, Monotonic::ZERO);
+    let mut room =
+        RoomState::create(peer(1), "Alice".into(), AdmissionPolicy::Open, Monotonic::ZERO);
     room.add_participant(participant(2), Epoch(1)).unwrap();
     room.add_participant(participant(3), Epoch(2)).unwrap();
     room.add_participant(participant(4), Epoch(3)).unwrap();

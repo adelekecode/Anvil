@@ -41,7 +41,13 @@ audiopus = "0.2"
 [profile.release]
 lto = "thin"
 codegen-units = 1
-panic = "abort"
+# panic = "abort" is deliberately NOT set.
+#
+# Every extern "C" entry point in anvil-ffi wraps its body in catch_unwind so a
+# Rust panic becomes an error code instead of killing the host app. Under
+# panic = "abort" those guards are dead code: the process aborts before they
+# ever run, which on Android is a bare SIGABRT with no Dart stack trace. Unwind
+# never escapes the FFI boundary because it is caught at every one of them.
 
 [profile.dev]
 # Audio + crypto paths are unusably slow in a fully unoptimised build.
