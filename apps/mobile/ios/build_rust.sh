@@ -5,6 +5,13 @@ set -eu
 REPOSITORY_ROOT="${SRCROOT}/../../.."
 TARGET="aarch64-apple-ios"
 
+# Xcode exports compiler variables containing its formatted build-setting
+# output. Cargo build-script executables are macOS host binaries; inheriting
+# those iOS compiler/linker values makes crates with build scripts try to invoke
+# a path containing leading spaces (rendered as `%20...cc`). Let rustc select
+# the host and Apple target linkers through xcrun instead.
+unset CC CXX LD AR CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
+
 CARGO_PATH="$(command -v cargo || true)"
 if [ -z "${CARGO_PATH}" ]; then
   CARGO_PATH="${HOME}/.cargo/bin/cargo"
