@@ -25,6 +25,17 @@ final class AnvilPlatform {
     private var sessionPtr: UnsafeMutableRawPointer?
 
     func attach(sessionPtr: UnsafeMutableRawPointer) {
+        // A second attach() without a matching detach() first would retain a
+        // *new* context while the adapters (lan/aware/audio/lifecycle) are
+        // still wired to the old one, and would overwrite `self.sessionPtr`
+        // out from under any callback already in flight against the old
+        // session. Flutter hot-restart on iOS re-runs Dart's `main()` and can
+        // call this a second time without the process ever exiting, so the
+        // guard is not theoretical. Tear down cleanly first.
+        if self.sessionPtr != nil {
+            NSLog("Anvil: attach() called while already attached — detaching stale session first")
+            detach()
+        }
         let retained = Unmanaged.passRetained(self).toOpaque()
         var callbacks = AnvilPlatformCallbacks(
             context: retained,

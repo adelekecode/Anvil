@@ -59,6 +59,17 @@ use crate::{AnvilConfig, AppState, Event, EventSink, PeerId, RoomId};
 /// jittery on its own.
 const TICK: core::time::Duration = core::time::Duration::from_millis(20);
 
+/// Extract a human-readable message from a caught panic payload.
+fn panic_message(error: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = error.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = error.downcast_ref::<&str>() {
+        s.to_string()
+    } else {
+        "unknown internal error".into()
+    }
+}
+
 fn provisional_peer_id(fingerprint: DiscoveryFingerprint) -> PeerId {
     let mut bytes = [0u8; 32];
     bytes[..fingerprint.len()].copy_from_slice(&fingerprint);
@@ -407,12 +418,31 @@ impl Engine {
         loop {
             match self.rx.recv_timeout(TICK) {
                 Ok(Command::Shutdown) => break,
-                Ok(command) => self.handle_command(command),
+                Ok(command) => {
+                    let result = std::panic::catch_unwind(
+                        std::panic::AssertUnwindSafe(|| self.handle_command(command)),
+                    );
+                    if let Err(e) = result {
+                        let msg = panic_message(&e);
+                        self.sink.emit(Event::Error {
+                            layer: "engine",
+                            message: format!("handler panic: {msg}"),
+                        });
+                    }
+                }
                 Err(RecvTimeoutError::Timeout) => {}
-                // Every handle dropped: nobody can talk to us again.
                 Err(RecvTimeoutError::Disconnected) => break,
             }
-            self.tick();
+
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.tick()));
+            if let Err(e) = result {
+                let msg = panic_message(&e);
+                self.sink.emit(Event::Error {
+                    layer: "engine",
+                    message: format!("tick panic: {msg}"),
+                });
+            }
         }
 
         self.set_state(AppState::Leaving);

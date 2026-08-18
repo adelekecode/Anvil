@@ -23,6 +23,7 @@
 //! the read cursor, with only one thread writing each.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 /// Capacity of the ring buffer in interleaved `i16` samples.
 ///
@@ -31,13 +32,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// can briefly deliver twice the sample count.
 pub const DEFAULT_CAPACITY: usize = 9_600;
 
-/// A lock-free single-producer single-consumer PCM ring buffer.
+/// A bounded SPSC PCM ring buffer for crossing the audio thread boundary.
+///
+/// The cursor indices are atomics for ordering; the buffer memory sits under
+/// a `Mutex` that is only held during the copy-in / copy-out, which keeps
+/// contention negligible — the two threads naturally produce and consume at
+/// roughly the same rate.
 ///
 /// The caller must guarantee that at most one thread calls [`Self::write`]
-/// and at most one (different) thread calls [`Self::read`]. Violating this
-/// is a data race; the atomics ensure ordering but not mutual exclusion.
+/// and at most one (different) thread calls [`Self::read`].
 pub struct PcmRingBuffer {
-    buf: Box<[i16]>,
+    buf: Mutex<Box<[i16]>>,
     /// The producer's next write index (monotonically increasing; masked
     /// with capacity to index into `buf`).
     write: AtomicUsize,
@@ -57,7 +62,7 @@ impl PcmRingBuffer {
         let pow2 = capacity.next_power_of_two();
         let buf = vec![0i16; pow2].into_boxed_slice();
         Self {
-            buf,
+            buf: Mutex::new(buf),
             write: AtomicUsize::new(0),
             read: AtomicUsize::new(0),
             capacity: pow2,
@@ -95,7 +100,7 @@ impl PcmRingBuffer {
         let cap = self.capacity;
         let mut dropped = 0;
 
-        let mut w = self.write.load(Ordering::Relaxed);
+        let w = self.write.load(Ordering::Relaxed);
         let r = self.read.load(Ordering::Acquire);
 
         // If we would overflow, advance the read cursor to drop the oldest
@@ -116,13 +121,14 @@ impl PcmRingBuffer {
         let start = w & self.mask;
         let end = (start + to_write) & self.mask;
 
+        let mut buf = self.buf.lock().expect("ring buffer mutex poisoned");
         if start < end {
-            self.buf[start..end].copy_from_slice(&samples[..to_write]);
+            buf[start..end].copy_from_slice(&samples[..to_write]);
         } else {
             // Wrap-around.
             let first_chunk = cap - start;
-            self.buf[start..].copy_from_slice(&samples[..first_chunk]);
-            self.buf[..end].copy_from_slice(&samples[first_chunk..to_write]);
+            buf[start..].copy_from_slice(&samples[..first_chunk]);
+            buf[..end].copy_from_slice(&samples[first_chunk..to_write]);
         }
 
         self.write.store(w.wrapping_add(to_write), Ordering::Release);
@@ -147,12 +153,13 @@ impl PcmRingBuffer {
         let start = r & self.mask;
         let end = (start + to_read) & self.mask;
 
+        let ring = self.buf.lock().expect("ring buffer mutex poisoned");
         if start < end {
-            buf[..to_read].copy_from_slice(&self.buf[start..end]);
+            buf[..to_read].copy_from_slice(&ring[start..end]);
         } else if to_read > 0 {
             let first_chunk = self.capacity - start;
-            buf[..first_chunk].copy_from_slice(&self.buf[start..]);
-            buf[first_chunk..to_read].copy_from_slice(&self.buf[..end]);
+            buf[..first_chunk].copy_from_slice(&ring[start..]);
+            buf[first_chunk..to_read].copy_from_slice(&ring[..end]);
         }
 
         // Zero the caller's remainder if we couldn't fill the whole buffer.

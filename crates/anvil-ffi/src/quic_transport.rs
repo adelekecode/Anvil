@@ -161,8 +161,25 @@ impl QuicTransport {
     }
 
     fn ensure_endpoint(&self) -> Result<Endpoint> {
-        if let Some(endpoint) = self.endpoint.lock().ok().and_then(|slot| slot.clone()) {
-            return Ok(endpoint);
+        // Hold the lock across the *entire* check-and-build sequence, not
+        // just the read and the final write.
+        //
+        // `listen()` runs as soon as this device starts advertising, and
+        // `connect()` runs as soon as discovery finds a peer — on a LAN both
+        // can fire within milliseconds of each other, from different
+        // threads. With the lock only guarding the read and the final
+        // store (as this used to), both threads see `None`, both generate a
+        // self-signed certificate, both try to install a process-wide rustls
+        // crypto provider, and both try to bind 0.0.0.0:47820 — the second
+        // bind fails. Holding the lock the whole way through instead makes
+        // the second caller simply block until the first finishes and reuse
+        // its endpoint.
+        let mut slot = self
+            .endpoint
+            .lock()
+            .map_err(|_| PlatformError::Adapter("QUIC endpoint lock poisoned".into()))?;
+        if let Some(endpoint) = slot.as_ref() {
+            return Ok(endpoint.clone());
         }
 
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -214,9 +231,10 @@ impl QuicTransport {
             }
         });
 
-        if let Ok(mut slot) = self.endpoint.lock() {
-            *slot = Some(endpoint.clone());
-        }
+        // `slot` is still the guard acquired at the top of this function —
+        // std::sync::Mutex is not reentrant, so re-locking `self.endpoint`
+        // here would deadlock the very race this function exists to avoid.
+        *slot = Some(endpoint.clone());
         Ok(endpoint)
     }
 }

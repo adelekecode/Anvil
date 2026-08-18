@@ -25,8 +25,6 @@
 
 use std::collections::VecDeque;
 
-use crate::audio::opus::VALID_FRAME_MS;
-
 /// The canonical internal sample rate for Opus encoding.
 pub const TARGET_SAMPLE_RATE: u32 = 48_000;
 
@@ -95,7 +93,6 @@ impl AudioResampler {
         // input[ceil], frac_part).
         let in_rate = self.input_rate as u64;
         let out_rate = TARGET_SAMPLE_RATE as u64;
-        let out_channels = TARGET_CHANNELS as usize;
 
         // Prepend the carry from the previous call so interpolation across
         // the chunk boundary works.
@@ -138,12 +135,10 @@ impl AudioResampler {
             self.frac += out_rate;
             if self.frac >= in_rate {
                 let consumed = (self.frac / in_rate) as usize;
-                // Save the last input frame(s) for interpolation across
-                // the next chunk boundary.
-                let keep = (consumed.saturating_sub(1) * in_channels).min(ring.len());
-                // Actually, we need the sample right before the current
-                // frac position. The last input frame we haven't consumed
-                // yet provides the "previous" for the next output.
+                // We need the sample right before the current frac position:
+                // the last input frame we haven't consumed yet provides the
+                // "previous" sample for the next output, computed below via
+                // `carry_start` rather than `consumed` directly.
                 self.frac %= in_rate;
                 // Keep the last input frame as carry.
                 let carry_start = (pos as usize).min(in_frames.saturating_sub(1)) * in_channels;
