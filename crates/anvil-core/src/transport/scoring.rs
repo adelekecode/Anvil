@@ -168,7 +168,12 @@ pub fn should_switch(
 mod tests {
     use super::*;
 
-    fn measured(rtt_ms: u64, loss: f32, jitter_ms: u64, uptime_ms: u64) -> (PathMetrics, Monotonic) {
+    fn measured(
+        rtt_ms: u64,
+        loss: f32,
+        jitter_ms: u64,
+        uptime_ms: u64,
+    ) -> (PathMetrics, Monotonic) {
         let now = Monotonic(uptime_ms);
         let mut m = PathMetrics::new(Monotonic::ZERO, 0);
         m.rtt = Duration::from_millis(rtt_ms);
@@ -208,8 +213,10 @@ mod tests {
         let bad_score = score_path(&bad, PathKind::Lan, &config, now);
         let good_score = score_path(&good, PathKind::WifiAware, &config, now);
 
-        assert!(good_score - bad_score >= config.switch_hysteresis,
-                "bad {bad_score} good {good_score}");
+        assert!(
+            good_score - bad_score >= config.switch_hysteresis,
+            "bad {bad_score} good {good_score}"
+        );
         assert_eq!(
             should_switch(bad_score, &bad, Monotonic::ZERO, good_score, &config, now),
             SwitchDecision::Switch
@@ -224,8 +231,7 @@ mod tests {
 
         // Adopted one second ago, and the candidate is *worse*. Still failover:
         // a worse working path beats a perfect dead one.
-        let decision =
-            should_switch(95.0, &dead, Monotonic(59_000), 40.0, &config, now);
+        let decision = should_switch(95.0, &dead, Monotonic(59_000), 40.0, &config, now);
 
         assert_eq!(decision, SwitchDecision::Failover);
     }
@@ -250,8 +256,10 @@ mod tests {
         let unmeasured_score = score_path(&unmeasured, PathKind::Lan, &config, now);
         let measured_score = score_path(&measured_path, PathKind::Lan, &config, now);
 
-        assert!(unmeasured_score < measured_score,
-                "unmeasured {unmeasured_score} measured {measured_score}");
+        assert!(
+            unmeasured_score < measured_score,
+            "unmeasured {unmeasured_score} measured {measured_score}"
+        );
     }
 
     #[test]

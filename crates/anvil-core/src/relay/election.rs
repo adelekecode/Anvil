@@ -184,10 +184,8 @@ pub fn elect(
         return None;
     }
 
-    let incumbent_score = ranked
-        .iter()
-        .find(|(c, _)| c.peer == incumbent_id)
-        .map_or(0.0, |(_, score)| *score);
+    let incumbent_score =
+        ranked.iter().find(|(c, _)| c.peer == incumbent_id).map_or(0.0, |(_, score)| *score);
 
     if best_score - incumbent_score >= config.election_hysteresis {
         Some(ElectionResult {
@@ -251,8 +249,9 @@ mod tests {
         let config = RelayConfig::default();
         let candidates = [candidate(1, 90.0, 2), candidate(2, 90.0, 1)];
 
-        assert!(elect(&candidates, None, Monotonic::ZERO, false, 3, &config, Monotonic(0))
-            .is_none());
+        assert!(
+            elect(&candidates, None, Monotonic::ZERO, false, 3, &config, Monotonic(0)).is_none()
+        );
     }
 
     #[test]
@@ -261,8 +260,15 @@ mod tests {
         let config = RelayConfig::default();
         let candidates = [candidate(1, 80.0, 3), candidate(2, 85.0, 3)];
 
-        let result = elect(&candidates, Some(peer(1)), Monotonic::ZERO, false, 3, &config,
-                           Monotonic(120_000));
+        let result = elect(
+            &candidates,
+            Some(peer(1)),
+            Monotonic::ZERO,
+            false,
+            3,
+            &config,
+            Monotonic(120_000),
+        );
 
         assert!(result.is_none(), "relay changed for a marginal improvement");
     }
@@ -276,9 +282,16 @@ mod tests {
         strong.capability = 100.0;
         let candidates = [candidate(1, 10.0, 3), strong];
 
-        let result = elect(&candidates, Some(peer(1)), Monotonic::ZERO, false, 3, &config,
-                           Monotonic(120_000))
-            .expect("a clearly better candidate should win");
+        let result = elect(
+            &candidates,
+            Some(peer(1)),
+            Monotonic::ZERO,
+            false,
+            3,
+            &config,
+            Monotonic(120_000),
+        )
+        .expect("a clearly better candidate should win");
 
         assert_eq!(result.relay, peer(2));
         assert_eq!(result.reason, ElectionReason::BetterCandidate);
@@ -304,9 +317,9 @@ mod tests {
         let config = RelayConfig::default();
         let candidates = [candidate(1, 80.0, 3), candidate(2, 70.0, 3)];
 
-        let result = elect(&candidates, Some(peer(3)), Monotonic(0), true, 3, &config,
-                           Monotonic(1_000))
-            .expect("a dead relay must be replaced regardless of term");
+        let result =
+            elect(&candidates, Some(peer(3)), Monotonic(0), true, 3, &config, Monotonic(1_000))
+                .expect("a dead relay must be replaced regardless of term");
 
         assert_eq!(result.reason, ElectionReason::RelayFailed);
         assert_eq!(result.relay, peer(1));
@@ -336,9 +349,15 @@ mod tests {
 
         let on_battery = candidate(1, 80.0, 3); // 80%, not charging, lower PeerId
 
-        let result =
-            elect(&[on_battery, plugged_in], None, Monotonic::ZERO, false, 3, &config,
-                  Monotonic(0));
+        let result = elect(
+            &[on_battery, plugged_in],
+            None,
+            Monotonic::ZERO,
+            false,
+            3,
+            &config,
+            Monotonic(0),
+        );
 
         assert_eq!(result.unwrap().relay, peer(5));
     }

@@ -4,6 +4,11 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
+import android.net.wifi.WifiManager
+import android.os.Build
+import android.util.Log
+import java.util.UUID
 
 /**
  * LAN discovery and connectivity on Android (§63).
@@ -59,6 +64,17 @@ class LanAdapter(
         context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
     }
 
+    private val wifi: WifiManager by lazy {
+        context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+    }
+
+    private var discoveryListener: NsdManager.DiscoveryListener? = null
+    private var registrationListener: NsdManager.RegistrationListener? = null
+    private var multicastLock: WifiManager.MulticastLock? = null
+    private val visibleHandles = mutableSetOf<String>()
+    private val serviceName = "Anvil-${UUID.randomUUID().toString().take(8)}"
+    @Volatile private var advertisedPayload: ByteArray? = null
+
     /**
      * Whether a Wi-Fi network is attached.
      *
@@ -73,28 +89,159 @@ class LanAdapter(
     }
 
     fun startDiscovery() {
-        // PHASE1: discoverServices("_anvil._udp", PROTOCOL_DNS_SD, listener).
-        // On onServiceFound, resolve (serialised) and emit PeerAdvertised with
-        // the TXT payload and host:port.
-        TODO("Phase 1: NSD browse")
+        if (discoveryListener != null) return
+
+        multicastLock = wifi.createMulticastLock("anvil-nsd").apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+
+        val listener = object : NsdManager.DiscoveryListener {
+            override fun onDiscoveryStarted(serviceType: String) = Unit
+
+            override fun onServiceFound(service: NsdServiceInfo) {
+                if (!service.serviceType.startsWith(SERVICE_TYPE.removeSuffix("."))) return
+                if (service.serviceName == serviceName) return
+                resolve(service)
+            }
+
+            override fun onServiceLost(service: NsdServiceInfo) {
+                synchronized(visibleHandles) { visibleHandles.remove(service.serviceName) }
+                emit(PlatformEvent.PeerAdvertisementLost("lan", service.serviceName))
+            }
+
+            override fun onDiscoveryStopped(serviceType: String) = Unit
+
+            override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
+                Log.w(TAG, "NSD discovery failed to start: $errorCode")
+                discoveryListener = null
+                releaseMulticastLock()
+                emit(PlatformEvent.NetworkChanged("lan", false))
+            }
+
+            override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {
+                Log.w(TAG, "NSD discovery failed to stop: $errorCode")
+            }
+        }
+        discoveryListener = listener
+        try {
+            nsd.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
+        } catch (error: RuntimeException) {
+            discoveryListener = null
+            releaseMulticastLock()
+            throw error
+        }
     }
 
     fun stopDiscovery() {
-        // PHASE1: stopServiceDiscovery.
+        val listener = discoveryListener ?: return
+        discoveryListener = null
+        try {
+            nsd.stopServiceDiscovery(listener)
+        } catch (_: IllegalArgumentException) {
+            // The framework may already have removed a failed listener.
+        }
+        val handles = synchronized(visibleHandles) {
+            visibleHandles.toList().also { visibleHandles.clear() }
+        }
+        handles.forEach { emit(PlatformEvent.PeerAdvertisementLost("lan", it)) }
+        releaseMulticastLock()
     }
 
     fun advertise(payload: ByteArray) {
-        // PHASE1: registerService with the payload as a TXT attribute. Update by
-        // unregistering and re-registering — NSD has no in-place update.
+        require(payload.size <= MAX_TXT_VALUE_BYTES) {
+            "Anvil advertisement is ${payload.size} bytes; NSD TXT limit is $MAX_TXT_VALUE_BYTES"
+        }
+        if (advertisedPayload?.contentEquals(payload) == true && registrationListener != null) return
+        stopAdvertising()
+        advertisedPayload = payload.copyOf()
+
+        val info = NsdServiceInfo().apply {
+            serviceName = this@LanAdapter.serviceName
+            serviceType = SERVICE_TYPE
+            port = DEFAULT_PORT
+            setAttribute(TXT_KEY, payload)
+        }
+        val listener = object : NsdManager.RegistrationListener {
+            override fun onServiceRegistered(service: NsdServiceInfo) {
+                Log.d(TAG, "Advertising ${service.serviceName} on port ${service.port}")
+            }
+
+            override fun onRegistrationFailed(service: NsdServiceInfo, errorCode: Int) {
+                Log.w(TAG, "NSD registration failed: $errorCode")
+                if (registrationListener === this) registrationListener = null
+            }
+
+            override fun onServiceUnregistered(service: NsdServiceInfo) = Unit
+
+            override fun onUnregistrationFailed(service: NsdServiceInfo, errorCode: Int) {
+                Log.w(TAG, "NSD unregistration failed: $errorCode")
+            }
+        }
+        registrationListener = listener
+        nsd.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
     }
 
     fun stopAdvertising() {
-        // PHASE1: unregisterService.
+        val listener = registrationListener ?: return
+        registrationListener = null
+        try {
+            nsd.unregisterService(listener)
+        } catch (_: IllegalArgumentException) {
+            // Already removed after a framework registration failure.
+        }
     }
 
     fun connect(pathId: Long, address: String) {
         // PHASE1: open a QUIC connection over a socket bound to the Wi-Fi
         // Network, then emit PathEstablished or PathLost carrying pathId.
         TODO("Phase 1: LAN QUIC connect")
+    }
+
+    fun close(pathId: Long) = Unit
+
+    fun sendDatagram(pathId: Long, data: ByteArray): Boolean = false
+
+    fun sendReliable(pathId: Long, data: ByteArray): Boolean = false
+
+    fun listen(): String = "0.0.0.0:$DEFAULT_PORT"
+
+    @Suppress("DEPRECATION")
+    private fun resolve(service: NsdServiceInfo) {
+        nsd.resolveService(
+            service,
+            object : NsdManager.ResolveListener {
+                override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                    Log.d(TAG, "Could not resolve ${serviceInfo.serviceName}: $errorCode")
+                }
+
+                override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
+                    val payload = serviceInfo.attributes[TXT_KEY] ?: return
+                    val host = serviceInfo.host?.hostAddress ?: return
+                    synchronized(visibleHandles) { visibleHandles.add(serviceInfo.serviceName) }
+                    emit(
+                        PlatformEvent.PeerAdvertised(
+                            kind = "lan",
+                            handle = serviceInfo.serviceName,
+                            address = "$host:${serviceInfo.port}",
+                            payload = payload,
+                        ),
+                    )
+                }
+            },
+        )
+    }
+
+    private fun releaseMulticastLock() {
+        multicastLock?.let { if (it.isHeld) it.release() }
+        multicastLock = null
+    }
+
+    private companion object {
+        const val TAG = "AnvilLan"
+        const val SERVICE_TYPE = "_anvil._udp."
+        const val TXT_KEY = "anvil"
+        const val DEFAULT_PORT = 47_820
+        const val MAX_TXT_VALUE_BYTES = 255
     }
 }

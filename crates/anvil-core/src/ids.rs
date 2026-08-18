@@ -225,8 +225,10 @@ mod tests {
 
     #[test]
     fn route_id_is_derived_from_leading_bytes() {
-        let peer = PeerId([0xde, 0xad, 0xbe, 0xef, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                           0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let peer = PeerId([
+            0xde, 0xad, 0xbe, 0xef, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0,
+        ]);
         assert_eq!(peer.route_id(), 0xdead_beef);
         assert_eq!(peer.short(), "deadbeef");
     }

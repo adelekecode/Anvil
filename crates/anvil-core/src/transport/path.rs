@@ -59,9 +59,13 @@ pub struct Path {
 impl Path {
     /// A newly discovered candidate.
     #[must_use]
-    pub fn candidate(id: PathId, peer: PeerId, endpoint: Endpoint, hops: u8, now: Monotonic)
-        -> Self
-    {
+    pub fn candidate(
+        id: PathId,
+        peer: PeerId,
+        endpoint: Endpoint,
+        hops: u8,
+        now: Monotonic,
+    ) -> Self {
         Self {
             id,
             peer,

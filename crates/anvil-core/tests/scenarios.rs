@@ -18,9 +18,7 @@ use anvil_core::relay::{decide, elect, ElectionReason, ForwardDecision, RelayCan
 use anvil_core::room::{Participant, RoomState};
 use anvil_core::routing::{resolve_media, Topology};
 use anvil_core::transport::{Endpoint, PathKind, PathSample, SwitchDecision, TransportManager};
-use anvil_core::{
-    Epoch, MediaTimestamp, Monotonic, PeerId, RelayConfig, SeqNum, TransportConfig,
-};
+use anvil_core::{Epoch, MediaTimestamp, Monotonic, PeerId, RelayConfig, SeqNum, TransportConfig};
 
 fn peer(n: u8) -> PeerId {
     let mut bytes = [0u8; 32];
@@ -49,10 +47,10 @@ fn losing_the_router_mid_call_does_not_disturb_the_room() {
 
     // Both paths to Bob come up.
     let mut transport = TransportManager::new(TransportConfig::default());
-    let lan = transport.add_candidate(peer(2), Endpoint::new(PathKind::Lan, "10.0.0.2:47820"), 0,
-                                      now);
-    let aware = transport.add_candidate(peer(2), Endpoint::new(PathKind::WifiAware, "aware:2"), 0,
-                                        now);
+    let lan =
+        transport.add_candidate(peer(2), Endpoint::new(PathKind::Lan, "10.0.0.2:47820"), 0, now);
+    let aware =
+        transport.add_candidate(peer(2), Endpoint::new(PathKind::WifiAware, "aware:2"), 0, now);
 
     for (path, rtt) in [(lan, 4), (aware, 8)] {
         transport.on_established(path, 1_200, now);
@@ -173,8 +171,15 @@ fn a_relay_forwards_media_and_nothing_that_confers_authority() {
         PacketType::RoomAccept,
         PacketType::Identity,
     ] {
-        let header = MediaHeader::new(kind, 7, peer(1).route_id(), 0, SeqNum(1),
-                                      MediaTimestamp(0), Epoch(3));
+        let header = MediaHeader::new(
+            kind,
+            7,
+            peer(1).route_id(),
+            0,
+            SeqNum(1),
+            MediaTimestamp(0),
+            Epoch(3),
+        );
         assert!(
             matches!(decide(&header, &members, Some(peer(1))), ForwardDecision::Drop { .. }),
             "{kind:?} must never be relayable"
@@ -193,10 +198,7 @@ fn a_relay_forwards_media_and_nothing_that_confers_authority() {
     assert!(relayed.mark_relayed());
     assert_eq!(media.associated_data(), relayed.associated_data());
     assert!(
-        matches!(
-            decide(&relayed, &members, Some(peer(1))),
-            ForwardDecision::Drop { .. }
-        ),
+        matches!(decide(&relayed, &members, Some(peer(1))), ForwardDecision::Drop { .. }),
         "a packet must never be forwarded twice"
     );
 }
@@ -247,8 +249,12 @@ fn a_peer_found_twice_becomes_one_peer_with_two_paths() {
 fn relayed_rooms_keep_the_senders_upload_at_one_stream() {
     let mut transport = TransportManager::new(TransportConfig::default());
     for n in [2u8, 3, 4] {
-        let path = transport.add_candidate(peer(n), Endpoint::new(PathKind::Lan, "10.0.0.1:1"), 0,
-                                           Monotonic::ZERO);
+        let path = transport.add_candidate(
+            peer(n),
+            Endpoint::new(PathKind::Lan, "10.0.0.1:1"),
+            0,
+            Monotonic::ZERO,
+        );
         transport.on_established(path, 1_200, Monotonic(100));
         transport.on_sample(path, PathSample::Rtt(Duration::from_millis(4)), Monotonic(100));
     }

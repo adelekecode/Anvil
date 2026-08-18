@@ -355,12 +355,16 @@ mod tests {
         let femi = peer(1);
         let daniel = peer(5);
 
-        let femi_state =
-            CallState::Idle.place(daniel, Monotonic(100)).unwrap().resolve_glare(femi, daniel,
-                                                                                 Monotonic(150));
-        let daniel_state =
-            CallState::Idle.place(femi, Monotonic(100)).unwrap().resolve_glare(daniel, femi,
-                                                                               Monotonic(150));
+        let femi_state = CallState::Idle.place(daniel, Monotonic(100)).unwrap().resolve_glare(
+            femi,
+            daniel,
+            Monotonic(150),
+        );
+        let daniel_state = CallState::Idle.place(femi, Monotonic(100)).unwrap().resolve_glare(
+            daniel,
+            femi,
+            Monotonic(150),
+        );
 
         // Femi's call wins because his PeerId is lower; Daniel's side answers.
         assert!(matches!(femi_state, CallState::Outgoing { .. }));

@@ -27,6 +27,4 @@ mod history;
 mod message;
 
 pub use history::{History, MAX_PER_CONVERSATION};
-pub use message::{
-    Conversation, DeliveryState, Message, MessageError, MessageId, MAX_BODY,
-};
+pub use message::{Conversation, DeliveryState, Message, MessageError, MessageId, MAX_BODY};

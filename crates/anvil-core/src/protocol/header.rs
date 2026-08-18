@@ -165,9 +165,7 @@ impl MediaHeader {
             room_route_id: u32::from_be_bytes(bytes[3..7].try_into().expect("checked length")),
             sender_route_id: u32::from_be_bytes(bytes[7..11].try_into().expect("checked length")),
             stream_id: u16::from_be_bytes(bytes[11..13].try_into().expect("checked length")),
-            sequence: SeqNum(u32::from_be_bytes(
-                bytes[13..17].try_into().expect("checked length"),
-            )),
+            sequence: SeqNum(u32::from_be_bytes(bytes[13..17].try_into().expect("checked length"))),
             timestamp: MediaTimestamp(u32::from_be_bytes(
                 bytes[17..21].try_into().expect("checked length"),
             )),
@@ -231,10 +229,7 @@ mod tests {
     fn rejects_every_truncation() {
         let full = sample().encode();
         for cut in 0..HEADER_LEN {
-            assert!(
-                MediaHeader::decode(&full[..cut]).is_err(),
-                "accepted a {cut}-byte header"
-            );
+            assert!(MediaHeader::decode(&full[..cut]).is_err(), "accepted a {cut}-byte header");
         }
     }
 

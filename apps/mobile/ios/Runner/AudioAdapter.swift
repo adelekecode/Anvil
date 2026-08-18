@@ -49,7 +49,10 @@ final class AudioAdapter {
     }
 
     static func hasMicrophonePermission() -> Bool {
-        AVAudioApplication.shared.recordPermission == .granted
+        if #available(iOS 17.0, *) {
+            return AVAudioApplication.shared.recordPermission == .granted
+        }
+        return AVAudioSession.sharedInstance().recordPermission == .granted
     }
 
     func startCapture(sampleRateHz: Int, channels: Int, frameMillis: Int) {

@@ -200,8 +200,7 @@ mod tests {
         let mut history = History::new();
         history.record(message("hello", 100));
         history.record(
-            Message::compose(peer(1), Conversation::Direct(peer(3)), "hi", Monotonic(200))
-                .unwrap(),
+            Message::compose(peer(1), Conversation::Direct(peer(3)), "hi", Monotonic(200)).unwrap(),
         );
 
         history.clear_conversation(Conversation::Direct(peer(2)));

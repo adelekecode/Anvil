@@ -111,9 +111,10 @@ mod tests {
 
     #[test]
     fn ten_millisecond_frames_are_half_the_size() {
-        let config =
-            AudioConfig { frame_duration: core::time::Duration::from_millis(10),
-                          ..AudioConfig::default() };
+        let config = AudioConfig {
+            frame_duration: core::time::Duration::from_millis(10),
+            ..AudioConfig::default()
+        };
         assert_eq!(samples_per_frame(&config), 480);
     }
 

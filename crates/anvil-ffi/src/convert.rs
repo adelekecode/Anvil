@@ -10,9 +10,13 @@
 //! reads them by hand.
 
 use anvil_core::chat::Conversation;
+use anvil_core::discovery::{Advertisement, PeerAdvertisement};
 use anvil_core::identity::parse_peer_id;
 use anvil_core::peer::{CallEnded, CallState};
-use anvil_core::{AnvilConfig, AppState, Command, Event, RoomId};
+use anvil_core::transport::{Endpoint, PathKind};
+use anvil_core::{
+    AnvilConfig, AppState, Command, Event, MediaTimestamp, PathId, PlatformEvent, RoomId,
+};
 use serde_json::{json, Value};
 
 /// Parse a config document. Unknown fields are ignored and missing ones take
@@ -44,23 +48,21 @@ pub fn command_from_json(text: &str) -> Option<Command> {
 
     Some(match value.get("type")?.as_str()? {
         // --- identity ---------------------------------------------------
-        "createProfile" => Command::CreateProfile {
-            display_name: value.get("displayName")?.as_str()?.to_owned(),
-        },
-        "renameProfile" => Command::RenameProfile {
-            display_name: value.get("displayName")?.as_str()?.to_owned(),
-        },
-        "verifyPeer" => Command::VerifyPeer {
-            peer_id: parse_peer_id(value.get("peerId")?.as_str()?)?,
-        },
+        "createProfile" => {
+            Command::CreateProfile { display_name: value.get("displayName")?.as_str()?.to_owned() }
+        }
+        "renameProfile" => {
+            Command::RenameProfile { display_name: value.get("displayName")?.as_str()?.to_owned() }
+        }
+        "verifyPeer" => {
+            Command::VerifyPeer { peer_id: parse_peer_id(value.get("peerId")?.as_str()?)? }
+        }
         "acceptIdentityChange" => Command::AcceptIdentityChange {
             peer_id: parse_peer_id(value.get("peerId")?.as_str()?)?,
         },
 
         // --- calls ------------------------------------------------------
-        "callPeer" => Command::CallPeer {
-            peer_id: parse_peer_id(value.get("peerId")?.as_str()?)?,
-        },
+        "callPeer" => Command::CallPeer { peer_id: parse_peer_id(value.get("peerId")?.as_str()?)? },
         "acceptCall" => Command::AcceptCall,
         "declineCall" => Command::DeclineCall,
         "endCall" => Command::EndCall,
@@ -71,9 +73,9 @@ pub fn command_from_json(text: &str) -> Option<Command> {
             body: value.get("body")?.as_str()?.to_owned(),
         },
 
-        "joinRoomByCode" => Command::JoinRoomByCode {
-            code: value.get("code")?.as_str()?.to_owned(),
-        },
+        "joinRoomByCode" => {
+            Command::JoinRoomByCode { code: value.get("code")?.as_str()?.to_owned() }
+        }
 
         "startDiscovery" => Command::StartDiscovery,
         "stopDiscovery" => Command::StopDiscovery,
@@ -91,6 +93,109 @@ pub fn command_from_json(text: &str) -> Option<Command> {
         "requestDiagnostics" => Command::RequestDiagnostics,
         _ => return None,
     })
+}
+
+/// Parse an event emitted by a Kotlin or Swift platform adapter.
+///
+/// This is intentionally strict: every byte in this document originates at an
+/// OS callback, but callback state can still be stale or malformed. Rejecting
+/// one bad event is safer than partially constructing protocol state.
+pub fn platform_event_from_json(text: &str) -> Option<PlatformEvent> {
+    let value: Value = serde_json::from_str(text).ok()?;
+
+    Some(match value.get("type")?.as_str()? {
+        "peerAdvertised" => {
+            let kind = path_kind(value.get("kind")?.as_str()?)?;
+            let payload = byte_array(value.get("payload")?)?;
+            PlatformEvent::PeerAdvertised {
+                advertisement: PeerAdvertisement {
+                    kind,
+                    handle: value.get("handle")?.as_str()?.to_owned(),
+                    endpoint: Endpoint::new(kind, value.get("address")?.as_str()?),
+                    advertisement: Advertisement::decode(&payload).ok()?,
+                },
+            }
+        }
+        "peerAdvertisementLost" => PlatformEvent::PeerAdvertisementLost {
+            kind: path_kind(value.get("kind")?.as_str()?)?,
+            handle: value.get("handle")?.as_str()?.to_owned(),
+        },
+        "pathEstablished" => PlatformEvent::PathEstablished {
+            path: PathId(value.get("pathId")?.as_u64()?),
+            max_datagram_size: usize::try_from(value.get("maxDatagramSize")?.as_u64()?).ok()?,
+        },
+        "pathLost" => PlatformEvent::PathLost {
+            path: PathId(value.get("pathId")?.as_u64()?),
+            reason: value.get("reason")?.as_str()?.to_owned(),
+        },
+        "datagramReceived" => PlatformEvent::DatagramReceived {
+            path: PathId(value.get("pathId")?.as_u64()?),
+            data: byte_array(value.get("data")?)?,
+        },
+        "networkChanged" => PlatformEvent::NetworkChanged {
+            kind: path_kind(value.get("kind")?.as_str()?)?,
+            available: value.get("available")?.as_bool()?,
+        },
+        "audioCaptured" => {
+            let samples = value
+                .get("samples")?
+                .as_array()?
+                .iter()
+                .map(|sample| i16::try_from(sample.as_i64()?).ok())
+                .collect::<Option<Vec<_>>>()?;
+            PlatformEvent::AudioCaptured {
+                frame: anvil_core::audio::PcmFrame::new(
+                    samples,
+                    u32::try_from(value.get("sampleRateHz")?.as_u64()?).ok()?,
+                    u8::try_from(value.get("channels")?.as_u64()?).ok()?,
+                    MediaTimestamp(u32::try_from(value.get("timestamp")?.as_u64()?).ok()?),
+                ),
+            }
+        }
+        "audioRouteChanged" => {
+            PlatformEvent::AudioRouteChanged { route: value.get("route")?.as_str()?.to_owned() }
+        }
+        "audioInterrupted" => {
+            PlatformEvent::AudioInterrupted { resumed: value.get("resumed")?.as_bool()? }
+        }
+        "permissionChanged" => PlatformEvent::PermissionChanged {
+            capability: capability(value.get("capability")?.as_str()?)?,
+            granted: value.get("granted")?.as_bool()?,
+        },
+        "deviceStatus" => PlatformEvent::DeviceStatus {
+            battery_pct: match value.get("batteryPct") {
+                None | Some(Value::Null) => None,
+                Some(percent) => Some(u8::try_from(percent.as_u64()?).ok()?),
+            },
+            charging: value.get("charging")?.as_bool()?,
+            thermally_throttled: value.get("thermallyThrottled")?.as_bool()?,
+        },
+        "lifecycleChanged" => {
+            PlatformEvent::LifecycleChanged { foreground: value.get("foreground")?.as_bool()? }
+        }
+        _ => return None,
+    })
+}
+
+fn path_kind(value: &str) -> Option<PathKind> {
+    match value {
+        "lan" => Some(PathKind::Lan),
+        "wifi-aware" => Some(PathKind::WifiAware),
+        _ => None,
+    }
+}
+
+fn byte_array(value: &Value) -> Option<Vec<u8>> {
+    value.as_array()?.iter().map(|byte| u8::try_from(byte.as_u64()?).ok()).collect()
+}
+
+fn capability(value: &str) -> Option<&'static str> {
+    match value {
+        "microphone" => Some("microphone"),
+        "nearby_devices" => Some("nearby_devices"),
+        "local_network" => Some("local_network"),
+        _ => None,
+    }
 }
 
 /// Render an event.
@@ -122,18 +227,15 @@ pub fn event_to_json(event: &Event) -> String {
             "protocolVersion": profile.protocol_version,
         }),
 
-        Event::IdentityChanged {
-            peer_id,
-            display_name,
-            previous_fingerprint,
-            new_fingerprint,
-        } => json!({
-            "type": "identityChanged",
-            "peerId": anvil_core::identity::peer_id_string(*peer_id),
-            "displayName": display_name,
-            "previousFingerprint": previous_fingerprint.short(),
-            "newFingerprint": new_fingerprint.short(),
-        }),
+        Event::IdentityChanged { peer_id, display_name, previous_fingerprint, new_fingerprint } => {
+            json!({
+                "type": "identityChanged",
+                "peerId": anvil_core::identity::peer_id_string(*peer_id),
+                "displayName": display_name,
+                "previousFingerprint": previous_fingerprint.short(),
+                "newFingerprint": new_fingerprint.short(),
+            })
+        }
 
         Event::PeerRenamed { peer_id, previous_name, display_name } => json!({
             "type": "peerRenamed",
@@ -388,22 +490,25 @@ mod tests {
     #[test]
     fn every_simple_command_parses() {
         for (text, matches) in [
-            (r#"{"type":"startDiscovery"}"#, matches!(
-                command_from_json(r#"{"type":"startDiscovery"}"#),
-                Some(Command::StartDiscovery)
-            )),
-            (r#"{"type":"createRoom"}"#, matches!(
-                command_from_json(r#"{"type":"createRoom"}"#),
-                Some(Command::CreateRoom)
-            )),
-            (r#"{"type":"leaveRoom"}"#, matches!(
-                command_from_json(r#"{"type":"leaveRoom"}"#),
-                Some(Command::LeaveRoom)
-            )),
-            (r#"{"type":"mute"}"#, matches!(
-                command_from_json(r#"{"type":"mute"}"#),
-                Some(Command::Mute)
-            )),
+            (
+                r#"{"type":"startDiscovery"}"#,
+                matches!(
+                    command_from_json(r#"{"type":"startDiscovery"}"#),
+                    Some(Command::StartDiscovery)
+                ),
+            ),
+            (
+                r#"{"type":"createRoom"}"#,
+                matches!(command_from_json(r#"{"type":"createRoom"}"#), Some(Command::CreateRoom)),
+            ),
+            (
+                r#"{"type":"leaveRoom"}"#,
+                matches!(command_from_json(r#"{"type":"leaveRoom"}"#), Some(Command::LeaveRoom)),
+            ),
+            (
+                r#"{"type":"mute"}"#,
+                matches!(command_from_json(r#"{"type":"mute"}"#), Some(Command::Mute)),
+            ),
         ] {
             assert!(matches, "failed to parse {text}");
         }
@@ -604,10 +709,9 @@ mod tests {
 
     #[test]
     fn config_parsing_ignores_unknown_fields() {
-        let config = config_from_json(
-            r#"{"displayName":"Adeleke","diagnostics":true,"somethingNew":123}"#,
-        )
-        .expect("should parse");
+        let config =
+            config_from_json(r#"{"displayName":"Adeleke","diagnostics":true,"somethingNew":123}"#)
+                .expect("should parse");
 
         assert_eq!(config.display_name, "Adeleke");
         assert!(config.diagnostics);
@@ -620,8 +724,7 @@ mod tests {
 
     #[test]
     fn error_events_name_the_layer() {
-        let json =
-            event_to_json(&Event::Error { layer: "transport", message: "no path".into() });
+        let json = event_to_json(&Event::Error { layer: "transport", message: "no path".into() });
         let value: Value = serde_json::from_str(&json).unwrap();
 
         assert_eq!(value["layer"], "transport");

@@ -61,8 +61,10 @@ impl RoomTransition {
     /// Whether this transition changes where media should be sent.
     #[must_use]
     pub const fn requires_reroute(&self) -> bool {
-        matches!(self, Self::RelayChanged { .. } | Self::MemberAdded { .. }
-                     | Self::MemberRemoved { .. })
+        matches!(
+            self,
+            Self::RelayChanged { .. } | Self::MemberAdded { .. } | Self::MemberRemoved { .. }
+        )
     }
 }
 

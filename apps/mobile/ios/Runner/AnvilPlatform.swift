@@ -80,9 +80,12 @@ final class AnvilPlatform {
 
     private func emit(_ event: PlatformEvent) {
         guard let sessionPtr else { return }
-        // PHASE1: forwards into the same command queue the Flutter side uses,
-        // so platform events and host commands are serialised in one place.
-        anvil_submit_platform_event(sessionPtr, event.jsonString())
+        event.jsonString().withCString { json in
+            let result = anvil_submit_platform_event(sessionPtr, json)
+            if result != 0 {
+                NSLog("Anvil: platform event rejected by core: \(result)")
+            }
+        }
     }
 }
 
@@ -97,4 +100,7 @@ struct Capabilities {
 
 /// Declared in the Rust static library. PHASE1.
 @_silgen_name("anvil_submit_platform_event")
-func anvil_submit_platform_event(_ session: UnsafeMutableRawPointer, _ json: String)
+func anvil_submit_platform_event(
+    _ session: UnsafeMutableRawPointer,
+    _ json: UnsafePointer<CChar>
+) -> Int32

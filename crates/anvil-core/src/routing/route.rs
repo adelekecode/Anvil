@@ -50,9 +50,7 @@ pub fn resolve_media(
         Topology::Relayed { is_local: true, .. } => members
             .iter()
             .filter(|m| **m != local)
-            .filter_map(|m| {
-                transport.active_path(*m).map(|path| Route { peer: *m, path: path.id })
-            })
+            .filter_map(|m| transport.active_path(*m).map(|path| Route { peer: *m, path: path.id }))
             .collect(),
     }
 }
@@ -88,8 +86,12 @@ mod tests {
     fn manager_with(peers: &[PeerId]) -> TransportManager {
         let mut mgr = TransportManager::new(TransportConfig::default());
         for p in peers {
-            let id = mgr.add_candidate(*p, Endpoint::new(PathKind::Lan, "10.0.0.1:47820"), 0,
-                                       Monotonic::ZERO);
+            let id = mgr.add_candidate(
+                *p,
+                Endpoint::new(PathKind::Lan, "10.0.0.1:47820"),
+                0,
+                Monotonic::ZERO,
+            );
             mgr.on_established(id, 1_200, Monotonic(100));
             mgr.on_sample(id, PathSample::Rtt(Duration::from_millis(4)), Monotonic(100));
         }
@@ -100,8 +102,8 @@ mod tests {
     #[test]
     fn direct_media_goes_to_the_one_peer() {
         let mgr = manager_with(&[peer(2)]);
-        let routes = resolve_media(&Topology::Direct { peer: peer(2) }, &[peer(1), peer(2)],
-                                   peer(1), &mgr);
+        let routes =
+            resolve_media(&Topology::Direct { peer: peer(2) }, &[peer(1), peer(2)], peer(1), &mgr);
 
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].peer, peer(2));

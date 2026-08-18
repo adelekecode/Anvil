@@ -72,8 +72,7 @@ impl Mixer {
     /// Produce the mixed frame.
     #[must_use]
     pub fn finish(&self, timestamp: MediaTimestamp) -> PcmFrame {
-        let samples =
-            self.accumulator.iter().map(|s| limit(*s)).collect::<Vec<i16>>();
+        let samples = self.accumulator.iter().map(|s| limit(*s)).collect::<Vec<i16>>();
 
         PcmFrame::new(samples, self.sample_rate_hz, self.channels, timestamp)
     }
@@ -220,8 +219,12 @@ mod tests {
         let mut mixer = Mixer::new(&config);
         mixer.begin();
 
-        let short = PcmFrame::new(vec![3_000; 100], config.sample_rate_hz, config.channels,
-                                  MediaTimestamp(0));
+        let short = PcmFrame::new(
+            vec![3_000; 100],
+            config.sample_rate_hz,
+            config.channels,
+            MediaTimestamp(0),
+        );
         mixer.add(peer(1), &short);
         mixer.add(peer(2), &frame(3_000, &config));
 

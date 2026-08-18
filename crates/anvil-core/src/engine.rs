@@ -284,13 +284,7 @@ impl Engine {
         sink: Arc<dyn EventSink>,
         local_peer_id: PeerId,
     ) -> (Self, EngineHandle) {
-        Self::new(
-            config,
-            Arc::new(NullPlatform),
-            sink,
-            Arc::new(SystemClock::new()),
-            local_peer_id,
-        )
+        Self::new(config, Arc::new(NullPlatform), sink, Arc::new(SystemClock::new()), local_peer_id)
     }
 
     /// Current node state.
@@ -425,12 +419,7 @@ impl Engine {
             let (active, standby) = self
                 .transport
                 .connection(change.peer)
-                .map(|c| {
-                    (
-                        c.active_path().map(|p| p.kind),
-                        c.standby_path().map(|p| p.kind),
-                    )
-                })
+                .map(|c| (c.active_path().map(|p| p.kind), c.standby_path().map(|p| p.kind)))
                 .unwrap_or((None, None));
 
             if let Some(active) = active {
@@ -471,6 +460,9 @@ impl Engine {
         if !capabilities.nearby_devices {
             self.sink.emit(Event::PermissionRequired { capability: "nearby_devices" });
             self.set_state(AppState::PermissionsRequired);
+            if let Err(error) = self.platform.request_permission("nearby_devices") {
+                self.emit_error("platform", &error);
+            }
             return;
         }
 
@@ -492,12 +484,18 @@ impl Engine {
             }
         }
 
-        self.set_state(if started { AppState::Discovering } else { AppState::Error });
+        if started {
+            self.set_state(AppState::Discovering);
+            self.refresh_advertisement();
+        } else {
+            self.set_state(AppState::Error);
+        }
     }
 
     fn stop_discovery(&mut self) {
         let _ = self.platform.stop_lan_discovery();
         let _ = self.platform.stop_aware_discovery();
+        let _ = self.platform.stop_advertising();
         if self.room.is_none() {
             self.set_state(AppState::Idle);
         }
@@ -516,8 +514,7 @@ impl Engine {
         // one from the other would cap the room's identity at the code's 40
         // bits, and room ids appear in packet headers.
         let identity = RoomIdentity::generate();
-        let mut room =
-            RoomState::create(self.local_peer_id, self.config.display_name.clone(), now);
+        let mut room = RoomState::create(self.local_peer_id, self.config.display_name.clone(), now);
         room.room_id = identity.room_id;
 
         let room_id = room.room_id;
@@ -525,10 +522,10 @@ impl Engine {
         self.room_identity = Some(identity);
 
         self.sink.emit(Event::RoomCreated { room_id, join_code: identity.join_code });
-        self.sink.emit(Event::RoomJoined {
-            room: self.room.as_ref().expect("just set").snapshot(),
-        });
+        self.sink
+            .emit(Event::RoomJoined { room: self.room.as_ref().expect("just set").snapshot() });
         self.set_state(AppState::Connected);
+        self.refresh_advertisement();
     }
 
     fn leave_room(&mut self) {
@@ -545,6 +542,7 @@ impl Engine {
 
         self.sink.emit(Event::RoomLeft { room_id: room.room_id, reason: "left".into() });
         self.set_state(AppState::Idle);
+        self.refresh_advertisement();
     }
 
     fn set_muted(&mut self, muted: bool) {
@@ -592,6 +590,7 @@ impl Engine {
                 self.profile = Some(profile.clone());
                 self.sink.emit(Event::ProfileReady { profile });
                 self.set_state(AppState::Idle);
+                self.refresh_advertisement();
             }
             Err(e) => self.emit_error_message("identity", e.to_string()),
         }
@@ -611,7 +610,27 @@ impl Engine {
         self.config.display_name = profile.display_name.clone();
         let profile = profile.clone();
         self.sink.emit(Event::ProfileReady { profile });
-        // PHASE1: re-advertise so nearby devices see the new name.
+        self.refresh_advertisement();
+    }
+
+    /// Publish the smallest useful, explicitly untrusted discovery record.
+    fn refresh_advertisement(&self) {
+        let Some(profile) = &self.profile else {
+            return;
+        };
+        let identity = PublicIdentity::new(profile.public_key);
+        let hosting = self.room.as_ref().filter(|room| room.is_host).map(|room| room.room_id);
+        let payload = crate::discovery::Advertisement::new(
+            identity.fingerprint(),
+            hosting,
+            &profile.display_name,
+        )
+        .encode();
+        if let Err(error) = self.platform.advertise(&payload) {
+            // Advertising before attachment is harmless during initial profile
+            // restoration; a later StartDiscovery always retries it.
+            tracing::debug!(%error, "could not refresh discovery advertisement");
+        }
     }
 
     fn set_peer_trust(&mut self, peer_id: PeerId, verified: bool) {
@@ -709,9 +728,10 @@ impl Engine {
     }
 
     fn announce_call(&self) {
-        let display_name = self.call.peer().and_then(|peer| {
-            self.known_peers.get(peer).map(|known| known.display_name.clone())
-        });
+        let display_name = self
+            .call
+            .peer()
+            .and_then(|peer| self.known_peers.get(peer).map(|known| known.display_name.clone()));
         self.sink.emit(Event::CallStateChanged { state: self.call, display_name });
     }
 
@@ -740,8 +760,7 @@ impl Engine {
             Conversation::Room(_) => self.room.is_some(),
         };
 
-        let delivery =
-            if reachable { DeliveryState::Sent } else { DeliveryState::Undeliverable };
+        let delivery = if reachable { DeliveryState::Sent } else { DeliveryState::Undeliverable };
 
         self.history.update_delivery(id, delivery);
         self.sink.emit(Event::MessageDelivery { id, delivery });
@@ -839,7 +858,12 @@ impl Engine {
             }
 
             PlatformEvent::PermissionChanged { capability, granted } => {
-                if !granted {
+                if granted
+                    && capability == "nearby_devices"
+                    && self.state == AppState::PermissionsRequired
+                {
+                    self.start_discovery();
+                } else if !granted {
                     self.sink.emit(Event::PermissionRequired { capability });
                 }
             }
@@ -1105,10 +1129,10 @@ mod tests {
         engine.handle_command(Command::StartDiscovery);
 
         assert_eq!(engine.state(), AppState::PermissionsRequired);
-        assert!(sink.events().iter().any(|e| matches!(
-            e,
-            Event::PermissionRequired { capability: "nearby_devices" }
-        )));
+        assert!(sink
+            .events()
+            .iter()
+            .any(|e| matches!(e, Event::PermissionRequired { capability: "nearby_devices" })));
     }
 
     #[test]
@@ -1171,8 +1195,7 @@ mod tests {
         let (mut engine, sink, _) = engine(FakePlatform::full());
         let fingerprint = [4u8; 8];
 
-        for (kind, address) in
-            [(PathKind::Lan, "10.0.0.4:47820"), (PathKind::WifiAware, "aware:2")]
+        for (kind, address) in [(PathKind::Lan, "10.0.0.4:47820"), (PathKind::WifiAware, "aware:2")]
         {
             engine.handle_command(Command::Platform(PlatformEvent::PeerAdvertised {
                 advertisement: PeerAdvertisement {
@@ -1212,11 +1235,8 @@ mod tests {
             }));
         }
 
-        let discovered = sink
-            .events()
-            .into_iter()
-            .filter(|e| matches!(e, Event::PeerDiscovered { .. }))
-            .count();
+        let discovered =
+            sink.events().into_iter().filter(|e| matches!(e, Event::PeerDiscovered { .. })).count();
         assert_eq!(discovered, 1);
     }
 

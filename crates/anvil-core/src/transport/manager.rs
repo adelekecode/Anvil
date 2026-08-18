@@ -16,8 +16,9 @@
 
 use std::collections::HashMap;
 
-use super::{score_path, should_switch, Endpoint, Path, PathKind, PathSample, PathState,
-            SwitchDecision};
+use super::{
+    score_path, should_switch, Endpoint, Path, PathKind, PathSample, PathState, SwitchDecision,
+};
 use crate::config::TransportConfig;
 use crate::time::Monotonic;
 use crate::{PathId, PeerId};
@@ -181,11 +182,8 @@ impl TransportManager {
         let (best_id, best_score) = *ranked.first()?;
 
         // Keep the runner-up warm, if we are keeping one at all.
-        conn.standby = if config.maintain_standby {
-            ranked.get(1).map(|(id, _)| *id)
-        } else {
-            None
-        };
+        conn.standby =
+            if config.maintain_standby { ranked.get(1).map(|(id, _)| *id) } else { None };
 
         let Some(active_id) = conn.active else {
             // Nothing active: adopt the best path. This is the cold-start and
@@ -278,8 +276,12 @@ mod tests {
     fn adopts_the_first_usable_path() {
         let mut mgr = TransportManager::new(TransportConfig::default());
         let alice = peer(1);
-        let lan = mgr.add_candidate(alice, Endpoint::new(PathKind::Lan, "10.0.0.5:7000"), 0,
-                                    Monotonic::ZERO);
+        let lan = mgr.add_candidate(
+            alice,
+            Endpoint::new(PathKind::Lan, "10.0.0.5:7000"),
+            0,
+            Monotonic::ZERO,
+        );
 
         // Nothing is usable until the adapter says the path is up.
         assert!(mgr.evaluate(Monotonic(100)).is_empty());
@@ -297,13 +299,21 @@ mod tests {
     fn second_path_becomes_standby_not_active() {
         let mut mgr = TransportManager::new(TransportConfig::default());
         let alice = peer(1);
-        let lan = mgr.add_candidate(alice, Endpoint::new(PathKind::Lan, "10.0.0.5:7000"), 0,
-                                    Monotonic::ZERO);
+        let lan = mgr.add_candidate(
+            alice,
+            Endpoint::new(PathKind::Lan, "10.0.0.5:7000"),
+            0,
+            Monotonic::ZERO,
+        );
         establish(&mut mgr, lan, 4, Monotonic(100));
         mgr.evaluate(Monotonic(100));
 
-        let aware = mgr.add_candidate(alice, Endpoint::new(PathKind::WifiAware, "aware:1"), 0,
-                                      Monotonic(200));
+        let aware = mgr.add_candidate(
+            alice,
+            Endpoint::new(PathKind::WifiAware, "aware:1"),
+            0,
+            Monotonic(200),
+        );
         establish(&mut mgr, aware, 6, Monotonic(200));
         let changes = mgr.evaluate(Monotonic(60_000));
 
@@ -321,10 +331,18 @@ mod tests {
         let mut mgr = TransportManager::new(TransportConfig::default());
         let alice = peer(1);
 
-        let lan = mgr.add_candidate(alice, Endpoint::new(PathKind::Lan, "10.0.0.5:7000"), 0,
-                                    Monotonic::ZERO);
-        let aware = mgr.add_candidate(alice, Endpoint::new(PathKind::WifiAware, "aware:1"), 0,
-                                      Monotonic::ZERO);
+        let lan = mgr.add_candidate(
+            alice,
+            Endpoint::new(PathKind::Lan, "10.0.0.5:7000"),
+            0,
+            Monotonic::ZERO,
+        );
+        let aware = mgr.add_candidate(
+            alice,
+            Endpoint::new(PathKind::WifiAware, "aware:1"),
+            0,
+            Monotonic::ZERO,
+        );
         establish(&mut mgr, lan, 4, Monotonic(100));
         establish(&mut mgr, aware, 8, Monotonic(100));
         mgr.evaluate(Monotonic(100));
@@ -345,10 +363,18 @@ mod tests {
     fn losing_a_standby_path_does_not_disturb_the_call() {
         let mut mgr = TransportManager::new(TransportConfig::default());
         let alice = peer(1);
-        let lan = mgr.add_candidate(alice, Endpoint::new(PathKind::Lan, "10.0.0.5:7000"), 0,
-                                    Monotonic::ZERO);
-        let aware = mgr.add_candidate(alice, Endpoint::new(PathKind::WifiAware, "aware:1"), 0,
-                                      Monotonic::ZERO);
+        let lan = mgr.add_candidate(
+            alice,
+            Endpoint::new(PathKind::Lan, "10.0.0.5:7000"),
+            0,
+            Monotonic::ZERO,
+        );
+        let aware = mgr.add_candidate(
+            alice,
+            Endpoint::new(PathKind::WifiAware, "aware:1"),
+            0,
+            Monotonic::ZERO,
+        );
         establish(&mut mgr, lan, 4, Monotonic(100));
         establish(&mut mgr, aware, 8, Monotonic(100));
         mgr.evaluate(Monotonic(100));
@@ -362,10 +388,18 @@ mod tests {
     fn degraded_active_path_yields_to_a_clean_one_after_dwell() {
         let mut mgr = TransportManager::new(TransportConfig::default());
         let alice = peer(1);
-        let lan = mgr.add_candidate(alice, Endpoint::new(PathKind::Lan, "10.0.0.5:7000"), 0,
-                                    Monotonic::ZERO);
-        let aware = mgr.add_candidate(alice, Endpoint::new(PathKind::WifiAware, "aware:1"), 0,
-                                      Monotonic::ZERO);
+        let lan = mgr.add_candidate(
+            alice,
+            Endpoint::new(PathKind::Lan, "10.0.0.5:7000"),
+            0,
+            Monotonic::ZERO,
+        );
+        let aware = mgr.add_candidate(
+            alice,
+            Endpoint::new(PathKind::WifiAware, "aware:1"),
+            0,
+            Monotonic::ZERO,
+        );
         establish(&mut mgr, lan, 4, Monotonic(100));
         establish(&mut mgr, aware, 5, Monotonic(100));
         mgr.evaluate(Monotonic(100));
@@ -390,8 +424,12 @@ mod tests {
     fn evaluation_is_idempotent() {
         let mut mgr = TransportManager::new(TransportConfig::default());
         let alice = peer(1);
-        let lan = mgr.add_candidate(alice, Endpoint::new(PathKind::Lan, "10.0.0.5:7000"), 0,
-                                    Monotonic::ZERO);
+        let lan = mgr.add_candidate(
+            alice,
+            Endpoint::new(PathKind::Lan, "10.0.0.5:7000"),
+            0,
+            Monotonic::ZERO,
+        );
         establish(&mut mgr, lan, 4, Monotonic(100));
 
         assert_eq!(mgr.evaluate(Monotonic(100)).len(), 1);
@@ -403,8 +441,12 @@ mod tests {
     fn peers_with_no_usable_path_are_not_reachable() {
         let mut mgr = TransportManager::new(TransportConfig::default());
         let alice = peer(1);
-        let lan = mgr.add_candidate(alice, Endpoint::new(PathKind::Lan, "10.0.0.5:7000"), 0,
-                                    Monotonic::ZERO);
+        let lan = mgr.add_candidate(
+            alice,
+            Endpoint::new(PathKind::Lan, "10.0.0.5:7000"),
+            0,
+            Monotonic::ZERO,
+        );
         establish(&mut mgr, lan, 4, Monotonic(100));
         mgr.evaluate(Monotonic(100));
         assert_eq!(mgr.reachable_peers().count(), 1);

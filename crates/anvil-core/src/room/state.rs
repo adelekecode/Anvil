@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 
 use crate::time::Monotonic;
-use crate::{Epoch, PeerId, RoomError, RoomId, Result};
+use crate::{Epoch, PeerId, Result, RoomError, RoomId};
 
 use super::membership::Participant;
 

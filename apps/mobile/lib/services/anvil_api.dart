@@ -14,6 +14,7 @@ import 'dart:ffi';
 import 'dart:isolate';
 
 import 'package:ffi/ffi.dart';
+import 'package:flutter/services.dart';
 
 import '../models/anvil_event.dart';
 import 'anvil_bindings.dart';
@@ -42,6 +43,8 @@ class AnvilApi {
   ReceivePort? _pumpPort;
   bool _disposed = false;
 
+  static const _platformChannel = MethodChannel('dev.anvil/platform');
+
   /// Events from the core.
   Stream<AnvilEvent> get events => _events.stream;
 
@@ -69,8 +72,16 @@ class AnvilApi {
     }
 
     final api = AnvilApi._(bindings, session);
-    await api._startPump();
-    return api;
+    try {
+      await _platformChannel.invokeMethod<void>('attach', {
+        'session': session.address,
+      });
+      await api._startPump();
+      return api;
+    } catch (_) {
+      bindings.shutdown(session);
+      rethrow;
+    }
   }
 
   // --- identity ---------------------------------------------------------
@@ -227,6 +238,13 @@ class AnvilApi {
     _pump = null;
     _pumpPort?.close();
     _pumpPort = null;
+
+    try {
+      await _platformChannel.invokeMethod<void>('detach');
+    } on MissingPluginException {
+      // The native session still has to be released in headless tests or on a
+      // host that deliberately embeds only the FFI layer.
+    }
 
     _bindings.shutdown(_session);
     _session = nullptr;

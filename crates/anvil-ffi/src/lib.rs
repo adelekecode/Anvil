@@ -48,11 +48,17 @@ use std::collections::VecDeque;
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::sync::{Arc, Condvar, Mutex};
 
-use anvil_core::{AnvilConfig, Command, Engine, EngineHandle, Event, EventSink, PeerId};
+use anvil_core::{
+    AnvilConfig, Command, Engine, EngineHandle, Event, EventSink, PeerId, SystemClock,
+};
 
+#[cfg(target_os = "android")]
+mod android_platform;
 mod convert;
+mod platform_bridge;
 
-use convert::{command_from_json, event_to_json};
+use convert::{command_from_json, event_to_json, platform_event_from_json};
+use platform_bridge::PlatformBridge;
 
 /// Success.
 pub const ANVIL_OK: c_int = 0;
@@ -104,10 +110,8 @@ impl EventQueue {
 
     fn pop_timeout(&self, timeout: std::time::Duration) -> Option<Event> {
         let events = self.events.lock().ok()?;
-        let (mut events, _) = self
-            .ready
-            .wait_timeout_while(events, timeout, |queue| queue.is_empty())
-            .ok()?;
+        let (mut events, _) =
+            self.ready.wait_timeout_while(events, timeout, |queue| queue.is_empty()).ok()?;
         events.pop_front()
     }
 }
@@ -129,6 +133,7 @@ impl EventSink for QueueSink {
 pub struct AnvilSession {
     handle: EngineHandle,
     queue: Arc<EventQueue>,
+    platform: Arc<PlatformBridge>,
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
@@ -136,14 +141,21 @@ impl AnvilSession {
     fn new(config: AnvilConfig, local_peer_id: PeerId) -> Self {
         let queue = Arc::new(EventQueue::default());
         let sink = Arc::new(QueueSink { queue: queue.clone() });
-        let (engine, handle) = Engine::headless(config, sink, local_peer_id);
+        let platform = Arc::new(PlatformBridge::default());
+        let (engine, handle) = Engine::new(
+            config,
+            platform.clone(),
+            sink,
+            Arc::new(SystemClock::new()),
+            local_peer_id,
+        );
 
         let thread = std::thread::Builder::new()
             .name("anvil-engine".into())
             .spawn(move || engine.run())
             .expect("failed to spawn engine thread");
 
-        Self { handle, queue, thread: Mutex::new(Some(thread)) }
+        Self { handle, queue, platform, thread: Mutex::new(Some(thread)) }
     }
 }
 
@@ -208,6 +220,102 @@ pub unsafe extern "C" fn anvil_command(
     });
 
     result.unwrap_or(ANVIL_ERR_PANIC)
+}
+
+/// Submit an event produced by a Kotlin or Swift platform adapter.
+///
+/// This enters the exact same engine inbox as host commands, which establishes
+/// one total ordering between UI actions, network callbacks and audio events.
+///
+/// # Safety
+/// `session` must come from [`anvil_init`] and `event_json` must be a valid
+/// NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn anvil_submit_platform_event(
+    session: *const AnvilSession,
+    event_json: *const c_char,
+) -> c_int {
+    if session.is_null() || event_json.is_null() {
+        return ANVIL_ERR_INVALID_ARG;
+    }
+
+    let result = std::panic::catch_unwind(|| {
+        let session = unsafe { &*session };
+        let Ok(text) = unsafe { CStr::from_ptr(event_json) }.to_str() else {
+            return ANVIL_ERR_INVALID_ARG;
+        };
+        let Some(event) = platform_event_from_json(text) else {
+            return ANVIL_ERR_BAD_COMMAND;
+        };
+
+        if session.handle.platform(event) {
+            ANVIL_OK
+        } else {
+            ANVIL_ERR_ENGINE_STOPPED
+        }
+    });
+
+    result.unwrap_or(ANVIL_ERR_PANIC)
+}
+
+/// JNI entry point used by `dev.anvil.AnvilPlatform.nativeSubmitEvent`.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub unsafe extern "system" fn Java_dev_anvil_AnvilPlatform_nativeSubmitEvent(
+    mut env: jni::JNIEnv,
+    _this: jni::objects::JObject,
+    session: jni::sys::jlong,
+    event_json: jni::objects::JString,
+) -> jni::sys::jint {
+    let Ok(text) = env.get_string(&event_json) else {
+        return ANVIL_ERR_INVALID_ARG;
+    };
+    let Ok(text) = text.to_str() else {
+        return ANVIL_ERR_INVALID_ARG;
+    };
+    let Ok(text) = CString::new(text) else {
+        return ANVIL_ERR_INVALID_ARG;
+    };
+
+    unsafe { anvil_submit_platform_event(session as *const AnvilSession, text.as_ptr()) }
+}
+
+/// Attach the Kotlin platform object to the already-running Rust session.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub unsafe extern "system" fn Java_dev_anvil_AnvilPlatform_nativeAttach(
+    env: jni::JNIEnv,
+    this: jni::objects::JObject,
+    session: jni::sys::jlong,
+) -> jni::sys::jint {
+    if session == 0 {
+        return ANVIL_ERR_INVALID_ARG;
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let vm = env.get_java_vm().map_err(|_| ANVIL_ERR_INVALID_ARG)?;
+        let object = env.new_global_ref(this).map_err(|_| ANVIL_ERR_INVALID_ARG)?;
+        let session = unsafe { &*(session as *const AnvilSession) };
+        session.platform.attach(Arc::new(android_platform::AndroidPlatform::new(vm, object)));
+        Ok::<_, c_int>(ANVIL_OK)
+    }));
+    result.unwrap_or(Err(ANVIL_ERR_PANIC)).unwrap_or_else(|code| code)
+}
+
+/// Detach the Kotlin object before Flutter destroys its engine.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub unsafe extern "system" fn Java_dev_anvil_AnvilPlatform_nativeDetach(
+    _env: jni::JNIEnv,
+    _this: jni::objects::JObject,
+    session: jni::sys::jlong,
+) {
+    if session == 0 {
+        return;
+    }
+    let _ = std::panic::catch_unwind(|| {
+        let session = unsafe { &*(session as *const AnvilSession) };
+        session.platform.detach();
+    });
 }
 
 /// Wait for the next event, up to `timeout_ms`.
@@ -310,6 +418,29 @@ mod tests {
 
         let command = c(r#"{"type":"createRoom"}"#);
         assert_eq!(unsafe { anvil_command(session, command.as_ptr()) }, ANVIL_OK);
+
+        unsafe { anvil_shutdown(session) };
+    }
+
+    #[test]
+    fn platform_events_are_accepted() {
+        let session = unsafe { anvil_init(std::ptr::null()) };
+        let event = c(r#"{"type":"networkChanged","kind":"lan","available":true}"#);
+
+        assert_eq!(unsafe { anvil_submit_platform_event(session, event.as_ptr()) }, ANVIL_OK);
+
+        unsafe { anvil_shutdown(session) };
+    }
+
+    #[test]
+    fn malformed_platform_events_are_rejected() {
+        let session = unsafe { anvil_init(std::ptr::null()) };
+        let event = c(r#"{"type":"networkChanged","kind":"bluetooth","available":true}"#);
+
+        assert_eq!(
+            unsafe { anvil_submit_platform_event(session, event.as_ptr()) },
+            ANVIL_ERR_BAD_COMMAND
+        );
 
         unsafe { anvil_shutdown(session) };
     }

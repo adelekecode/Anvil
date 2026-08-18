@@ -122,8 +122,10 @@ mod tests {
 
     #[test]
     fn short_identifiers_are_marked_as_truncated_and_do_not_parse() {
-        let peer = PeerId([0x7A, 0xB9, 0x30, 0x11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                           0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let peer = PeerId([
+            0x7A, 0xB9, 0x30, 0x11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0,
+        ]);
         let short = peer_id_short_string(peer);
 
         assert!(short.starts_with("anv_7ab93"));

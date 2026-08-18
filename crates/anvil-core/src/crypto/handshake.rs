@@ -109,11 +109,9 @@ impl Handshake {
     /// continuing and hoping.
     pub fn on_hello_received(&mut self, their_version: u8) -> Result<u8> {
         if self.state.is_terminal() {
-            return Err(ProtocolError::UnexpectedMessage {
-                message: "Hello",
-                state: "terminal",
-            }
-            .into());
+            return Err(
+                ProtocolError::UnexpectedMessage { message: "Hello", state: "terminal" }.into()
+            );
         }
 
         match crate::protocol::negotiate(their_version) {

@@ -71,8 +71,9 @@ mod time;
 
 pub use config::{AnvilConfig, AudioConfig, RelayConfig, TransportConfig};
 pub use engine::{Command, Engine, EngineHandle};
-pub use error::{AudioError, CryptoError, Error, PlatformError, ProtocolError, Result, RoomError,
-                TransportError};
+pub use error::{
+    AudioError, CryptoError, Error, PlatformError, ProtocolError, Result, RoomError, TransportError,
+};
 pub use event::{AppState, ConnectionQuality, Event, EventSink, NullSink, RecordingSink};
 pub use ids::{Epoch, PathId, PeerId, RoomId, SeqNum, StreamId};
 pub use platform::{PlatformAdapter, PlatformEvent};

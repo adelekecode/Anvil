@@ -94,4 +94,12 @@ class WifiAwareAdapter(
         // the core decides whether to try again.
         TODO("Phase 4: Wi-Fi Aware data path")
     }
+
+    fun close(pathId: Long) = Unit
+
+    fun sendDatagram(pathId: Long, data: ByteArray): Boolean = false
+
+    fun sendReliable(pathId: Long, data: ByteArray): Boolean = false
+
+    fun listen(): String = error("Wi-Fi Aware listener is not established")
 }

@@ -161,10 +161,8 @@ impl KnownPeers {
             known.last_seen = now;
 
             if known.display_name != display_name {
-                let previous_name = core::mem::replace(
-                    &mut known.display_name,
-                    display_name.to_owned(),
-                );
+                let previous_name =
+                    core::mem::replace(&mut known.display_name, display_name.to_owned());
                 return TofuOutcome::Renamed { previous_name };
             }
             return TofuOutcome::Recognised;
@@ -385,8 +383,7 @@ mod tests {
         known.observe(peer(2), key(2), "Sarah", Monotonic(500));
         known.observe(peer(3), key(3), "Michael", Monotonic(300));
 
-        let order: Vec<&str> =
-            known.all().iter().map(|p| p.display_name.as_str()).collect();
+        let order: Vec<&str> = known.all().iter().map(|p| p.display_name.as_str()).collect();
         assert_eq!(order, vec!["Sarah", "Michael", "Daniel"]);
     }
 

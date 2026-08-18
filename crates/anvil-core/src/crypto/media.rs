@@ -140,11 +140,8 @@ impl ReplayWindow {
 
         if let Some(advance) = sequence.distance_from(highest) {
             // Newer. Shift the window forward.
-            self.seen = if advance >= 64 {
-                0
-            } else {
-                (self.seen << advance) | (1u64 << (advance - 1))
-            };
+            self.seen =
+                if advance >= 64 { 0 } else { (self.seen << advance) | (1u64 << (advance - 1)) };
             self.highest = Some(sequence);
             return Ok(());
         }

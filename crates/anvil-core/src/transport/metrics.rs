@@ -142,8 +142,8 @@ fn ewma(current: f32, sample: f32, alpha: f32, initialised: bool) -> f32 {
 }
 
 fn ewma_duration(current: Duration, sample: Duration, alpha: f32, initialised: bool) -> Duration {
-    let millis = ewma(current.as_secs_f32() * 1000.0, sample.as_secs_f32() * 1000.0, alpha,
-                      initialised);
+    let millis =
+        ewma(current.as_secs_f32() * 1000.0, sample.as_secs_f32() * 1000.0, alpha, initialised);
     Duration::from_micros((millis.max(0.0) * 1000.0) as u64)
 }
 

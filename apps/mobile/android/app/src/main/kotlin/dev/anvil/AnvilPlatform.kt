@@ -1,7 +1,11 @@
 package dev.anvil
 
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.util.Log
+import androidx.activity.ComponentActivity
+import androidx.core.app.ActivityCompat
 
 /**
  * The Android side of the platform boundary (§9, §90).
@@ -44,17 +48,22 @@ class AnvilPlatform(private val context: Context) {
     private var sessionPtr: Long = 0L
 
     fun attach(sessionPtr: Long) {
+        val result = nativeAttach(sessionPtr)
+        check(result == 0) { "Rust rejected Android platform attachment: $result" }
         this.sessionPtr = sessionPtr
         lifecycle.start()
     }
 
     fun detach() {
+        val ptr = sessionPtr
         lifecycle.stop()
         lan.stopDiscovery()
+        lan.stopAdvertising()
         aware.stopDiscovery()
         audio.stopCapture()
         audio.stopPlayback()
         sessionPtr = 0L
+        if (ptr != 0L) nativeDetach(ptr)
     }
 
     /**
@@ -73,6 +82,16 @@ class AnvilPlatform(private val context: Context) {
         nearbyDevices = Permissions.hasNearbyDevices(context),
         secureKeyStorage = KeyStore.hasHardwareBackedStorage(context),
     )
+
+    /** Compact, allocation-free form consumed by the JNI adapter. */
+    fun capabilitiesMask(): Int {
+        val value = capabilities()
+        return (if (value.lan) 1 else 0) or
+            (if (value.wifiAware) 2 else 0) or
+            (if (value.microphone) 4 else 0) or
+            (if (value.nearbyDevices) 8 else 0) or
+            (if (value.secureKeyStorage) 16 else 0)
+    }
 
     // --- calls from the core ------------------------------------------------
 
@@ -104,14 +123,84 @@ class AnvilPlatform(private val context: Context) {
 
     fun stopCapture() = audio.stopCapture()
 
+    fun startPlayback(sampleRateHz: Int, channels: Int) =
+        audio.startPlayback(sampleRateHz, channels)
+
+    fun stopPlayback() = audio.stopPlayback()
+
     fun play(samples: ShortArray) = audio.play(samples)
+
+    fun close(pathId: Long) {
+        lan.close(pathId)
+        aware.close(pathId)
+    }
+
+    fun sendDatagram(pathId: Long, data: ByteArray) {
+        if (!lan.sendDatagram(pathId, data)) aware.sendDatagram(pathId, data)
+    }
+
+    fun sendReliable(pathId: Long, data: ByteArray) {
+        if (!lan.sendReliable(pathId, data)) aware.sendReliable(pathId, data)
+    }
+
+    fun listen(kind: String): String = when (kind) {
+        "lan" -> lan.listen()
+        "wifi-aware" -> aware.listen()
+        else -> error("unknown path kind $kind")
+    }
+
+    fun loadIdentity(): ByteArray? = KeyStore.loadIdentity()
+    fun storeIdentity(bytes: ByteArray) = KeyStore.storeIdentity(bytes)
+    fun clearIdentity() = KeyStore.clearIdentity()
+
+    fun requestPermission(capability: String) {
+        val activity = context as? ComponentActivity
+        if (activity == null) {
+            emit(PlatformEvent.PermissionChanged(capability, false))
+            return
+        }
+        val permission = when (capability) {
+            "microphone" -> android.Manifest.permission.RECORD_AUDIO
+            "nearby_devices" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                android.Manifest.permission.NEARBY_WIFI_DEVICES
+            } else {
+                android.Manifest.permission.ACCESS_FINE_LOCATION
+            }
+            else -> {
+                emit(PlatformEvent.PermissionChanged(capability, false))
+                return
+            }
+        }
+        ActivityCompat.requestPermissions(activity, arrayOf(permission), permissionRequestCode(capability))
+    }
+
+    fun onRequestPermissionsResult(
+        requestCode: Int,
+        grantResults: IntArray,
+    ) {
+        val capability = when (requestCode) {
+            REQUEST_MICROPHONE -> "microphone"
+            REQUEST_NEARBY -> "nearby_devices"
+            else -> return
+        }
+        emit(
+            PlatformEvent.PermissionChanged(
+                capability,
+                grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED,
+            ),
+        )
+    }
+
+    private fun permissionRequestCode(capability: String): Int =
+        if (capability == "microphone") REQUEST_MICROPHONE else REQUEST_NEARBY
 
     // --- events to the core -------------------------------------------------
 
     private fun emit(event: PlatformEvent) {
         val ptr = sessionPtr
         if (ptr == 0L) return
-        nativeSubmitEvent(ptr, event.toJson())
+        val result = nativeSubmitEvent(ptr, event.toJson())
+        if (result != 0) Log.w(TAG, "platform event rejected by core: $result")
     }
 
     /**
@@ -121,10 +210,14 @@ class AnvilPlatform(private val context: Context) {
      * forwards into the same command queue the Flutter side uses, so platform
      * events and host commands are serialised in one place.
      */
-    private external fun nativeSubmitEvent(sessionPtr: Long, json: String)
+    private external fun nativeSubmitEvent(sessionPtr: Long, json: String): Int
+    private external fun nativeAttach(sessionPtr: Long): Int
+    private external fun nativeDetach(sessionPtr: Long)
 
     companion object {
         private const val TAG = "Anvil"
+        private const val REQUEST_MICROPHONE = 4101
+        private const val REQUEST_NEARBY = 4102
 
         init {
             System.loadLibrary("anvil_ffi")

@@ -55,11 +55,9 @@ impl MediaPacket {
         let body = &bytes[HEADER_LEN..];
 
         if body.len() < TAG_LEN {
-            return Err(ProtocolError::Truncated {
-                got: bytes.len(),
-                need: HEADER_LEN + TAG_LEN,
-            }
-            .into());
+            return Err(
+                ProtocolError::Truncated { got: bytes.len(), need: HEADER_LEN + TAG_LEN }.into()
+            );
         }
 
         Ok(Self { header, ciphertext: body.to_vec() })
