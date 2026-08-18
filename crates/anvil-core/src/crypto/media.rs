@@ -72,6 +72,12 @@ impl MediaKey {
         &self.key
     }
 
+    /// Export key plus nonce salt for delivery over an authenticated session.
+    #[must_use]
+    pub fn material(&self) -> ([u8; KEY_LEN], [u8; NONCE_LEN]) {
+        (self.key, self.salt)
+    }
+
     /// Nonce for one frame.
     ///
     /// Deterministic in (epoch, stream, sequence), so sender and receiver

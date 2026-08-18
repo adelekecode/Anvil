@@ -42,19 +42,27 @@
 //! talks to [`GroupKeyManager`], never to sender-key internals. Swapping in an
 //! MLS implementation should touch this module and nothing else.
 
+#[cfg(feature = "crypto")]
+pub mod control;
 pub mod epoch;
 pub mod handshake;
 pub mod identity;
 pub mod key_store;
 pub mod media;
 pub mod sender_key;
+#[cfg(feature = "crypto")]
+pub mod session;
 
+#[cfg(feature = "crypto")]
+pub use control::{AppControl, SecureControl};
 pub use epoch::EpochManager;
 pub use handshake::{Handshake, HandshakeState};
 pub use identity::{DeviceIdentity, IdentityFingerprint, PublicIdentity};
 pub use key_store::IdentityStore;
 pub use media::{MediaKey, ReplayWindow, NONCE_LEN};
 pub use sender_key::SenderKeyManager;
+#[cfg(feature = "crypto")]
+pub use session::{EstablishedSession, SessionHandshake};
 
 use crate::{Epoch, PeerId, Result};
 

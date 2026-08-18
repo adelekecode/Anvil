@@ -14,7 +14,7 @@ pub(crate) type LoadIdentityCallback = unsafe extern "C" fn(*mut c_void, *mut u8
 pub(crate) type ReleaseCallback = unsafe extern "C" fn(*mut c_void);
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct AnvilPlatformCallbacks {
     pub context: *mut c_void,
     pub capabilities: Option<CapabilitiesCallback>,

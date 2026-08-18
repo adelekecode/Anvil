@@ -116,6 +116,30 @@ impl SenderKeyManager {
     pub fn can_decrypt(&self, member: PeerId) -> bool {
         self.member_keys.contains_key(&(member, self.epochs.current()))
     }
+
+    /// Ensure this sender has fresh material for an epoch and return it for distribution.
+    pub fn own_key_for_epoch(&mut self, epoch: Epoch) -> ([u8; 32], [u8; 12]) {
+        self.own_keys.entry(epoch).or_insert_with(|| {
+            let mut key = [0u8; 32];
+            let mut salt = [0u8; 12];
+            rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut key);
+            rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut salt);
+            MediaKey::new(key, salt)
+        });
+        self.own_keys.get(&epoch).expect("key inserted").material()
+    }
+
+    /// Install another authenticated member's sender material.
+    pub fn install_member_material(
+        &mut self,
+        member: PeerId,
+        epoch: Epoch,
+        key: [u8; 32],
+        salt: [u8; 12],
+    ) {
+        self.member_keys.insert((member, epoch), MediaKey::new(key, salt));
+        self.replay.insert((member, epoch), ReplayWindow::new());
+    }
 }
 
 impl GroupKeyManager for SenderKeyManager {
@@ -123,10 +147,25 @@ impl GroupKeyManager for SenderKeyManager {
         self.epochs.current()
     }
 
-    fn seal(&mut self, _plaintext: &[u8], _associated_data: &[u8]) -> Result<Vec<u8>> {
-        // PHASE2: ChaCha20-Poly1305 under own_keys[current], nonce derived from
-        // (epoch, stream, sequence) per crypto::media.
-        Err(crate::Error::NotImplemented("crypto::sender_key::seal (Phase 2)"))
+    fn seal(&mut self, plaintext: &[u8], associated_data: &[u8]) -> Result<Vec<u8>> {
+        use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+        let header = crate::protocol::MediaHeader::decode(associated_data)?;
+        let epoch = Epoch(u64::from(header.epoch));
+        let key = self
+            .own_keys
+            .get(&epoch)
+            .ok_or(CryptoError::UnknownEpoch(epoch))?;
+        let cipher = chacha20poly1305::ChaCha20Poly1305::new(key.bytes().into());
+        cipher
+            .encrypt(
+                chacha20poly1305::Nonce::from_slice(&key.nonce(
+                    epoch,
+                    header.stream_id,
+                    header.sequence,
+                )),
+                Payload { msg: plaintext, aad: associated_data },
+            )
+            .map_err(|_| CryptoError::AuthenticationFailed.into())
     }
 
     fn open(
@@ -134,8 +173,8 @@ impl GroupKeyManager for SenderKeyManager {
         sender: PeerId,
         epoch: Epoch,
         sequence: SeqNum,
-        _ciphertext: &[u8],
-        _associated_data: &[u8],
+        ciphertext: &[u8],
+        associated_data: &[u8],
     ) -> Result<Vec<u8>> {
         // Order matters and is checked here rather than in the caller.
         //
@@ -144,14 +183,25 @@ impl GroupKeyManager for SenderKeyManager {
             return Err(CryptoError::UnknownEpoch(epoch).into());
         }
 
-        // 2. PHASE2: authenticate and decrypt.
-        //
-        // The replay window is updated only *after* the tag verifies — see
-        // ReplayWindow::check_and_update. Recording an unauthenticated sequence
-        // number would let an attacker who cannot decrypt anything still censor
-        // the stream by pre-claiming sequence numbers.
-        let _ = (sequence, &mut self.replay);
-        Err(crate::Error::NotImplemented("crypto::sender_key::open (Phase 2)"))
+        use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+        let header = crate::protocol::MediaHeader::decode(associated_data)?;
+        let key = self.member_keys.get(&(sender, epoch)).expect("checked above");
+        let cipher = chacha20poly1305::ChaCha20Poly1305::new(key.bytes().into());
+        let plaintext = cipher
+            .decrypt(
+                chacha20poly1305::Nonce::from_slice(&key.nonce(
+                    epoch,
+                    header.stream_id,
+                    sequence,
+                )),
+                Payload { msg: ciphertext, aad: associated_data },
+            )
+            .map_err(|_| CryptoError::AuthenticationFailed)?;
+        self.replay
+            .get_mut(&(sender, epoch))
+            .expect("installed with key")
+            .check_and_update(sequence)?;
+        Ok(plaintext)
     }
 
     fn rotate(&mut self, new_epoch: Epoch, members: &[PeerId]) -> Result<()> {

@@ -1,8 +1,12 @@
 package dev.anvil
 
 import android.content.Context
-import android.media.AudioManager
-import android.util.Log
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.AudioTrack
+import android.media.MediaRecorder
+import android.os.Process
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Microphone capture and speaker playback on Android.
@@ -42,35 +46,107 @@ class AudioAdapter(
     private val emit: (PlatformEvent) -> Unit,
 ) {
 
-    private val audioManager: AudioManager by lazy {
-        context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-    }
+    private val capturing = AtomicBoolean(false)
+    @Volatile private var record: AudioRecord? = null
+    @Volatile private var track: AudioTrack? = null
+    private var captureThread: Thread? = null
 
     fun startCapture(sampleRateHz: Int, channels: Int, frameMillis: Int) {
-        // PHASE1: AudioRecord with MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-        // read on a dedicated thread at frameMillis cadence, emit AudioCaptured.
-        Log.w(TAG, "Audio capture is not implemented; ignoring start request")
+        if (capturing.get()) return
+        if (!Permissions.hasMicrophone(context)) {
+            emit(PlatformEvent.PermissionChanged("microphone", false))
+            return
+        }
+        val channelConfig = if (channels == 1) AudioFormat.CHANNEL_IN_MONO
+        else AudioFormat.CHANNEL_IN_STEREO
+        val frameSamples = sampleRateHz * frameMillis / 1000 * channels
+        val minimum = AudioRecord.getMinBufferSize(
+            sampleRateHz,
+            channelConfig,
+            AudioFormat.ENCODING_PCM_16BIT,
+        )
+        val audioRecord = AudioRecord(
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+            sampleRateHz,
+            channelConfig,
+            AudioFormat.ENCODING_PCM_16BIT,
+            maxOf(minimum, frameSamples * 8),
+        )
+        check(audioRecord.state == AudioRecord.STATE_INITIALIZED) { "AudioRecord initialization failed" }
+        record = audioRecord
+        capturing.set(true)
+        audioRecord.startRecording()
+        captureThread = Thread({
+            Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
+            var timestamp = 0L
+            val samples = ShortArray(frameSamples)
+            while (capturing.get()) {
+                var offset = 0
+                while (offset < samples.size && capturing.get()) {
+                    val read = audioRecord.read(samples, offset, samples.size - offset)
+                    if (read <= 0) break
+                    offset += read
+                }
+                if (offset == samples.size) {
+                    emit(PlatformEvent.AudioCaptured(samples.copyOf(), sampleRateHz, channels, timestamp))
+                    timestamp = (timestamp + frameSamples / channels).and(0xFFFF_FFFFL)
+                }
+            }
+        }, "anvil-audio-capture").also { it.start() }
     }
 
     fun stopCapture() {
-        // PHASE1: stop and release.
+        capturing.set(false)
+        record?.let {
+            try { it.stop() } catch (_: IllegalStateException) { }
+            it.release()
+        }
+        record = null
+        captureThread?.interrupt()
+        captureThread = null
     }
 
     fun startPlayback(sampleRateHz: Int, channels: Int) {
-        // PHASE1: AudioTrack in streaming mode, low-latency performance mode.
-        Log.w(TAG, "Audio playback is not implemented; ignoring start request")
+        if (track != null) return
+        val channelConfig = if (channels == 1) AudioFormat.CHANNEL_OUT_MONO
+        else AudioFormat.CHANNEL_OUT_STEREO
+        val minimum = AudioTrack.getMinBufferSize(
+            sampleRateHz,
+            channelConfig,
+            AudioFormat.ENCODING_PCM_16BIT,
+        )
+        val audioTrack = AudioTrack.Builder()
+            .setAudioAttributes(
+                android.media.AudioAttributes.Builder()
+                    .setUsage(android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build(),
+            )
+            .setAudioFormat(
+                AudioFormat.Builder()
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .setSampleRate(sampleRateHz)
+                    .setChannelMask(channelConfig)
+                    .build(),
+            )
+            .setBufferSizeInBytes(maxOf(minimum, sampleRateHz / 10 * channels * 2))
+            .setTransferMode(AudioTrack.MODE_STREAM)
+            .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+            .build()
+        check(audioTrack.state == AudioTrack.STATE_INITIALIZED) { "AudioTrack initialization failed" }
+        track = audioTrack
+        audioTrack.play()
     }
 
     fun stopPlayback() {
-        // PHASE1: stop and release.
+        track?.let {
+            try { it.stop() } catch (_: IllegalStateException) { }
+            it.release()
+        }
+        track = null
     }
 
     fun play(samples: ShortArray) {
-        // PHASE1: AudioTrack.write. Must not block past the frame duration —
-        // overrunning it is an underrun the user hears.
-    }
-
-    private companion object {
-        const val TAG = "AnvilAudio"
+        track?.write(samples, 0, samples.size, AudioTrack.WRITE_NON_BLOCKING)
     }
 }

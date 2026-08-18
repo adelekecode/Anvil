@@ -102,6 +102,15 @@ impl PeerTable {
         Self::default()
     }
 
+    /// Confirmed peers advertising a particular room lookup hint.
+    pub fn confirmed_for_room_hint(&self, hint: u32) -> Vec<PeerId> {
+        self.peers
+            .values()
+            .filter(|peer| peer.room_hint == Some(hint) && peer.confirmed)
+            .filter_map(|peer| peer.peer_id)
+            .collect()
+    }
+
     /// Record a sighting, merging it into an existing peer where possible.
     pub fn observe(&mut self, ad: &PeerAdvertisement, now: Monotonic) -> SightingOutcome {
         let fingerprint = ad.advertisement.fingerprint;

@@ -11,6 +11,7 @@ enum PlatformEvent {
     case peerAdvertisementLost(kind: String, handle: String)
     case pathEstablished(pathId: UInt64, maxDatagramSize: Int)
     case pathLost(pathId: UInt64, reason: String)
+    case audioCaptured(samples: [Int16], sampleRate: Int, channels: Int, timestamp: UInt64)
     case networkChanged(kind: String, available: Bool)
     case audioInterrupted(resumed: Bool)
     case audioRouteChanged(route: String)
@@ -40,6 +41,14 @@ enum PlatformEvent {
             ]
         case let .pathLost(pathId, reason):
             object = ["type": "pathLost", "pathId": pathId, "reason": reason]
+        case let .audioCaptured(samples, sampleRate, channels, timestamp):
+            object = [
+                "type": "audioCaptured",
+                "samples": samples.map(Int.init),
+                "sampleRate": sampleRate,
+                "channels": channels,
+                "timestamp": timestamp,
+            ]
         case let .networkChanged(kind, available):
             object = ["type": "networkChanged", "kind": kind, "available": available]
         case let .audioInterrupted(resumed):

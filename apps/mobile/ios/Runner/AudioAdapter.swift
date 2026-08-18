@@ -43,6 +43,12 @@ final class AudioAdapter {
 
     private let emit: (PlatformEvent) -> Void
     private let engine = AVAudioEngine()
+    private let player = AVAudioPlayerNode()
+    private var captureInstalled = false
+    private var playerAttached = false
+    private var captureSamples: [Int16] = []
+    private var captureTimestamp: UInt64 = 0
+    private var playbackFormat: AVAudioFormat?
 
     init(emit: @escaping (PlatformEvent) -> Void) {
         self.emit = emit
@@ -56,24 +62,108 @@ final class AudioAdapter {
     }
 
     func startCapture(sampleRateHz: Int, channels: Int, frameMillis: Int) {
-        // PHASE1: configure AVAudioSession, install a tap on the input node,
-        // emit AudioCaptured per frame.
-        fatalError("Phase 1: AVAudioEngine capture")
+        guard !captureInstalled else { return }
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(
+                .playAndRecord,
+                mode: .voiceChat,
+                options: [.allowBluetoothHFP, .defaultToSpeaker]
+            )
+            try session.setPreferredSampleRate(Double(sampleRateHz))
+            try session.setPreferredIOBufferDuration(Double(frameMillis) / 1_000)
+            try session.setActive(true)
+        } catch {
+            NSLog("Anvil: audio session setup failed: \(error)")
+            return
+        }
+
+        let frameSamples = sampleRateHz * frameMillis / 1_000
+        let input = engine.inputNode
+        let format = input.outputFormat(forBus: 0)
+        captureSamples.removeAll(keepingCapacity: true)
+        captureTimestamp = 0
+        input.installTap(
+            onBus: 0,
+            bufferSize: AVAudioFrameCount(frameSamples),
+            format: format
+        ) { [weak self] buffer, _ in
+            guard let self, let channelsData = buffer.floatChannelData else { return }
+            let source = channelsData[0]
+            for index in 0..<Int(buffer.frameLength) {
+                let scaled = max(-1, min(1, source[index])) * Float(Int16.max)
+                self.captureSamples.append(Int16(scaled))
+            }
+            while self.captureSamples.count >= frameSamples {
+                let frame = Array(self.captureSamples.prefix(frameSamples))
+                self.captureSamples.removeFirst(frameSamples)
+                self.emit(
+                    .audioCaptured(
+                        samples: frame,
+                        sampleRate: sampleRateHz,
+                        channels: channels,
+                        timestamp: self.captureTimestamp
+                    )
+                )
+                self.captureTimestamp = (self.captureTimestamp + UInt64(frameSamples)) & 0xFFFF_FFFF
+            }
+        }
+        captureInstalled = true
+        startEngineIfNeeded()
     }
 
     func stopCapture() {
+        guard captureInstalled else { return }
         engine.inputNode.removeTap(onBus: 0)
+        captureInstalled = false
+        captureSamples.removeAll()
     }
 
     func startPlayback(sampleRateHz: Int, channels: Int) {
-        // PHASE1: AVAudioPlayerNode scheduled from the mixer output.
+        if !playerAttached {
+            engine.attach(player)
+            playerAttached = true
+        }
+        guard let format = AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: Double(sampleRateHz),
+            channels: AVAudioChannelCount(channels),
+            interleaved: false
+        ) else { return }
+        playbackFormat = format
+        engine.connect(player, to: engine.mainMixerNode, format: format)
+        startEngineIfNeeded()
+        if !player.isPlaying { player.play() }
     }
 
     func stopPlayback() {
-        engine.stop()
+        player.stop()
     }
 
     func play(_ samples: [Int16]) {
-        // PHASE1: schedule a buffer. Must not block past the frame duration.
+        guard let format = playbackFormat,
+              let buffer = AVAudioPCMBuffer(
+                pcmFormat: format,
+                frameCapacity: AVAudioFrameCount(samples.count / Int(format.channelCount))
+              ),
+              let target = buffer.int16ChannelData
+        else { return }
+        buffer.frameLength = buffer.frameCapacity
+        for channel in 0..<Int(format.channelCount) {
+            for frame in 0..<Int(buffer.frameLength) {
+                target[channel][frame] = samples[frame * Int(format.channelCount) + channel]
+            }
+        }
+        player.scheduleBuffer(buffer)
+    }
+
+    private func startEngineIfNeeded() {
+        guard !engine.isRunning else { return }
+        do {
+            engine.prepare()
+            try engine.start()
+        } catch {
+            NSLog("Anvil: AVAudioEngine failed to start: \(error)")
+        }
     }
 }

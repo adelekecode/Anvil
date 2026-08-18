@@ -208,6 +208,7 @@ pub fn event_to_json(event: &Event) -> String {
         Event::PeerDiscovered { peer } => json!({
             "type": "peerDiscovered",
             "fingerprint": hex(&peer.fingerprint),
+            "peerId": peer.peer_id.map(anvil_core::identity::peer_id_string),
             "displayName": peer.display_name,
             "confirmed": peer.confirmed,
             "hostingRoom": peer.room_hint.is_some(),

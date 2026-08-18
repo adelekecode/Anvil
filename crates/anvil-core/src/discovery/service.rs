@@ -56,10 +56,20 @@ impl Advertisement {
     /// Build an advertisement for this node.
     #[must_use]
     pub fn new(fingerprint: Fingerprint, hosting: Option<RoomId>, display_name: &str) -> Self {
+        Self::with_room_hint(fingerprint, hosting.map(|room| room.route_id()), display_name)
+    }
+
+    /// Build an advertisement with a pre-derived, non-secret room lookup hint.
+    #[must_use]
+    pub fn with_room_hint(
+        fingerprint: Fingerprint,
+        room_hint: Option<u32>,
+        display_name: &str,
+    ) -> Self {
         Self {
             version: PROTOCOL_VERSION,
             fingerprint,
-            room_hint: hosting.map(|r| r.route_id()),
+            room_hint,
             display_name: truncate_chars(display_name, MAX_NAME_LEN),
         }
     }

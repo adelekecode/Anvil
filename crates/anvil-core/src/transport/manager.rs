@@ -125,6 +125,39 @@ impl TransportManager {
         }
     }
 
+    /// Move a provisional discovery path under the identity proven by its handshake.
+    pub fn confirm_peer(&mut self, path: PathId, confirmed: PeerId, now: Monotonic) -> bool {
+        let provisional = self
+            .peers
+            .iter()
+            .find(|(_, connection)| connection.paths.contains_key(&path))
+            .map(|(peer, _)| *peer);
+        let Some(provisional) = provisional else { return false };
+        if provisional == confirmed {
+            return true;
+        }
+
+        let Some(mut candidate) = self.peers.get_mut(&provisional).and_then(|connection| {
+            if connection.active == Some(path) {
+                connection.active = None;
+            }
+            if connection.standby == Some(path) {
+                connection.standby = None;
+            }
+            connection.paths.remove(&path)
+        }) else {
+            return false;
+        };
+        candidate.peer = confirmed;
+        let connection =
+            self.peers.entry(confirmed).or_insert_with(|| PeerConnection::new(confirmed, now));
+        connection.paths.insert(path, candidate);
+        if self.peers.get(&provisional).is_some_and(|connection| connection.paths.is_empty()) {
+            self.peers.remove(&provisional);
+        }
+        true
+    }
+
     /// Fold a measurement into a path.
     pub fn on_sample(&mut self, path: PathId, sample: PathSample, now: Monotonic) {
         if let Some(p) = self.path_mut(path) {
@@ -231,6 +264,15 @@ impl TransportManager {
     #[must_use]
     pub fn active_path(&self, peer: PeerId) -> Option<&Path> {
         self.peers.get(&peer)?.active_path()
+    }
+
+    /// Authenticated peer currently owning a local path id.
+    #[must_use]
+    pub fn peer_for_path(&self, path: PathId) -> Option<PeerId> {
+        self.peers
+            .iter()
+            .find(|(_, connection)| connection.paths.contains_key(&path))
+            .map(|(peer, _)| *peer)
     }
 
     /// Everything known about a peer's connectivity.

@@ -215,10 +215,16 @@ pub struct Engine {
     /// QUIC paths opened from unauthenticated discovery sightings, keyed until
     /// the identity handshake promotes them to a real peer id.
     pending_paths: std::collections::HashMap<crate::PathId, DiscoveryFingerprint>,
+    #[cfg(feature = "crypto")]
+    handshakes: std::collections::HashMap<crate::PathId, crate::crypto::SessionHandshake>,
+    #[cfg(feature = "crypto")]
+    secure_control: std::collections::HashMap<crate::PathId, crate::crypto::SecureControl>,
     transport: TransportManager,
     room: Option<RoomState>,
     /// Room id plus the human-facing join code, for a room we host or joined.
     room_identity: Option<RoomIdentity>,
+    /// Parsed code retained while waiting for an authenticated host response.
+    pending_join_code: Option<JoinCode>,
     keys: SenderKeyManager,
     relay_monitor: Option<RelayMonitor>,
 
@@ -281,8 +287,13 @@ impl Engine {
             history: History::new(),
             peers: PeerTable::new(),
             pending_paths: std::collections::HashMap::new(),
+            #[cfg(feature = "crypto")]
+            handshakes: std::collections::HashMap::new(),
+            #[cfg(feature = "crypto")]
+            secure_control: std::collections::HashMap::new(),
             room: None,
             room_identity: None,
+            pending_join_code: None,
             relay_monitor: None,
             jitter: std::collections::HashMap::new(),
             counters: Counters::default(),
@@ -545,6 +556,7 @@ impl Engine {
             .emit(Event::RoomJoined { room: self.room.as_ref().expect("just set").snapshot() });
         self.set_state(AppState::Connected);
         self.refresh_advertisement();
+        self.start_audio();
     }
 
     fn leave_room(&mut self) {
@@ -730,10 +742,15 @@ impl Engine {
             return;
         };
         let identity = PublicIdentity::new(profile.public_key);
-        let hosting = self.room.as_ref().filter(|room| room.is_host).map(|room| room.room_id);
-        let payload = crate::discovery::Advertisement::new(
+        let room_hint = self
+            .room
+            .as_ref()
+            .filter(|room| room.is_host)
+            .and(self.room_identity)
+            .map(|identity| identity.join_code.discovery_token());
+        let payload = crate::discovery::Advertisement::with_room_hint(
             identity.fingerprint(),
-            hosting,
+            room_hint,
             &profile.display_name,
         )
         .encode();
@@ -806,7 +823,13 @@ impl Engine {
             Ok(state) => {
                 self.call = state;
                 self.announce_call();
-                // PHASE1: send CALL_REQUEST over the peer's reliable stream.
+                #[cfg(feature = "crypto")]
+                if let Err(error) =
+                    self.send_control(peer_id, crate::crypto::AppControl::CallRequest)
+                {
+                    self.emit_error("call", &error);
+                    self.finish_remote_call(CallEnded::Unreachable);
+                }
             }
             Err(e) => self.emit_error_message("call", e.to_string()),
         }
@@ -816,16 +839,38 @@ impl Engine {
         let now = self.clock.now();
         match self.call.accept(now) {
             Ok(state) => {
+                let peer = state.peer();
                 self.call = state;
                 self.announce_call();
-                let _ = self.platform.start_capture(&self.config.audio);
-                let _ = self.platform.start_playback(&self.config.audio);
+                #[cfg(feature = "crypto")]
+                if let Some(peer) = peer {
+                    if let Err(error) =
+                        self.send_control(peer, crate::crypto::AppControl::CallAccept)
+                    {
+                        self.emit_error("call", &error);
+                    }
+                }
+                self.start_audio();
             }
             Err(e) => self.emit_error_message("call", e.to_string()),
         }
     }
 
     fn end_call(&mut self, reason: CallEnded) {
+        let peer_id = self.call.peer();
+        #[cfg(feature = "crypto")]
+        if let Some(peer) = peer_id {
+            let control = if reason == CallEnded::Declined {
+                crate::crypto::AppControl::CallDecline
+            } else {
+                crate::crypto::AppControl::CallEnd
+            };
+            let _ = self.send_control(peer, control);
+        }
+        self.finish_remote_call(reason);
+    }
+
+    fn finish_remote_call(&mut self, reason: CallEnded) {
         let peer_id = self.call.peer();
         let (state, ended) = self.call.end(reason);
         self.call = state;
@@ -866,18 +911,26 @@ impl Engine {
         // v0.1 has no store-and-forward: a message either goes now or is
         // marked undeliverable, and the UI says so rather than showing a
         // hopeful clock forever.
-        let reachable = match conversation {
-            Conversation::Direct(peer) => self.transport.active_path(peer).is_some(),
-            Conversation::Room(_) => self.room.is_some(),
+        let delivered = match conversation {
+            Conversation::Direct(peer) => {
+                #[cfg(feature = "crypto")]
+                {
+                    self.send_control(
+                        peer,
+                        crate::crypto::AppControl::Chat { id, body: body.trim().to_owned() },
+                    )
+                    .is_ok()
+                }
+                #[cfg(not(feature = "crypto"))]
+                false
+            }
+            Conversation::Room(_) => false,
         };
 
-        let delivery = if reachable { DeliveryState::Sent } else { DeliveryState::Undeliverable };
+        let delivery = if delivered { DeliveryState::Sent } else { DeliveryState::Undeliverable };
 
         self.history.update_delivery(id, delivery);
         self.sink.emit(Event::MessageDelivery { id, delivery });
-
-        // PHASE1: write the message to the peer's reliable stream, and update
-        // delivery to Delivered on application-level acknowledgement.
     }
 
     // --- rooms ------------------------------------------------------------
@@ -894,13 +947,30 @@ impl Engine {
         }
 
         self.set_state(AppState::JoiningRoom);
-
-        // PHASE1: derive the discovery token, look for a member advertising it,
-        // then run the membership handshake. The room id itself arrives in
-        // RoomAccept — the code only bootstraps discovery.
-        let _token = code.discovery_token();
-        self.emit_error_message("room", "joining by code is not implemented yet (Phase 1)".into());
-        self.set_state(AppState::Idle);
+        let hosts = self.peers.confirmed_for_room_hint(code.discovery_token());
+        if hosts.is_empty() {
+            self.emit_error_message("room", "no nearby host is advertising that code".into());
+            self.set_state(AppState::Idle);
+            return;
+        }
+        self.pending_join_code = Some(code);
+        #[cfg(feature = "crypto")]
+        {
+            let mut sent = false;
+            for host in hosts {
+                match self.send_control(
+                    host,
+                    crate::crypto::AppControl::RoomJoin { code: code.formatted() },
+                ) {
+                    Ok(()) => sent = true,
+                    Err(error) => self.emit_error("room", &error),
+                }
+            }
+            if !sent {
+                self.pending_join_code = None;
+                self.set_state(AppState::Idle);
+            }
+        }
     }
 
     // --- platform events --------------------------------------------------
@@ -948,6 +1018,17 @@ impl Engine {
 
             PlatformEvent::PathEstablished { path, max_datagram_size } => {
                 self.transport.on_established(path, max_datagram_size, now);
+                #[cfg(feature = "crypto")]
+                if let (Some(fingerprint), Some(identity)) =
+                    (self.pending_paths.get(&path).copied(), self.device_identity.as_ref())
+                {
+                    let handshake = crate::crypto::SessionHandshake::new(fingerprint);
+                    let hello = handshake.hello(identity);
+                    self.handshakes.insert(path, handshake);
+                    if let Err(error) = self.platform.send_reliable(path, &hello) {
+                        self.emit_error("transport", &error);
+                    }
+                }
             }
 
             PlatformEvent::PathLost { path, reason } => {
@@ -998,6 +1079,11 @@ impl Engine {
                     && self.state == AppState::PermissionsRequired
                 {
                     self.start_discovery();
+                } else if granted
+                    && capability == "microphone"
+                    && (self.room.is_some() || self.call.is_active())
+                {
+                    self.start_audio();
                 } else if !granted {
                     self.sink.emit(Event::PermissionRequired { capability });
                 }
@@ -1033,10 +1119,234 @@ impl Engine {
     }
 
     fn on_reliable(&mut self, path: crate::PathId, data: &[u8]) {
-        // The transport guarantees message boundaries by using one QUIC
-        // unidirectional stream per control record. Authentication and control
-        // decoding are layered here in the next handshake step.
-        tracing::trace!(?path, bytes = data.len(), "reliable control record received");
+        #[cfg(feature = "crypto")]
+        {
+            if crate::crypto::SecureControl::is_record(data) {
+                let message = self
+                    .secure_control
+                    .get_mut(&path)
+                    .ok_or_else(|| {
+                        crate::CryptoError::HandshakeFailed("control before identity").into()
+                    })
+                    .and_then(|control| control.open(data));
+                match message {
+                    Ok(message) => self.handle_app_control(path, message),
+                    Err(error) => self.fail_handshake(path, &error),
+                }
+                return;
+            }
+            let Some(record_type) = crate::crypto::SessionHandshake::record_type(data) else {
+                tracing::debug!(?path, "discarding unknown reliable record");
+                return;
+            };
+            if record_type == crate::crypto::SessionHandshake::HELLO_RECORD {
+                let Some(identity) = self.device_identity.as_ref() else { return };
+                let Some(profile) = self.profile.as_ref() else { return };
+                let response: crate::Result<Vec<u8>> = match self.handshakes.get_mut(&path) {
+                    Some(handshake) => {
+                        handshake.receive_hello(data, identity, &profile.display_name)
+                    }
+                    None => Err(crate::CryptoError::HandshakeFailed("unknown path").into()),
+                };
+                match response {
+                    Ok(response) => {
+                        if let Err(error) = self.platform.send_reliable(path, &response) {
+                            self.emit_error("transport", &error);
+                        }
+                    }
+                    Err(error) => self.fail_handshake(path, &error),
+                }
+                return;
+            }
+            if record_type == crate::crypto::SessionHandshake::IDENTITY_RECORD {
+                let result = self
+                    .handshakes
+                    .get_mut(&path)
+                    .ok_or_else(|| crate::CryptoError::HandshakeFailed("unknown path").into())
+                    .and_then(|handshake| handshake.receive_identity(data));
+                match result {
+                    Ok(established) => self.complete_handshake(path, established),
+                    Err(error) => self.fail_handshake(path, &error),
+                }
+            }
+        }
+        #[cfg(not(feature = "crypto"))]
+        tracing::trace!(?path, bytes = data.len(), "crypto feature disabled; control ignored");
+    }
+
+    #[cfg(feature = "crypto")]
+    fn complete_handshake(
+        &mut self,
+        path: crate::PathId,
+        established: crate::crypto::EstablishedSession,
+    ) {
+        let Some(fingerprint) = self.pending_paths.remove(&path) else { return };
+        self.secure_control
+            .insert(path, crate::crypto::SecureControl::new(established.session_key));
+        self.transport.confirm_peer(path, established.peer_id, self.clock.now());
+        self.peers.confirm(fingerprint, established.peer_id, established.display_name.clone());
+        self.record_authenticated_peer(
+            established.peer_id,
+            established.public_key,
+            &established.display_name,
+        );
+        if let Some(peer) = self.peers.get(&fingerprint) {
+            self.sink.emit(Event::PeerDiscovered { peer: peer.clone() });
+        }
+        let _ = self.transport.evaluate(self.clock.now());
+    }
+
+    #[cfg(feature = "crypto")]
+    fn fail_handshake(&mut self, path: crate::PathId, error: &crate::Error) {
+        self.emit_error("crypto", error);
+        self.handshakes.remove(&path);
+        self.secure_control.remove(&path);
+        self.pending_paths.remove(&path);
+        let _ = self.platform.close(path);
+        let _ = self.transport.on_lost(path, self.clock.now());
+    }
+
+    #[cfg(feature = "crypto")]
+    fn send_control(
+        &mut self,
+        peer: PeerId,
+        message: crate::crypto::AppControl,
+    ) -> crate::Result<()> {
+        let path = self
+            .transport
+            .active_path(peer)
+            .map(|path| path.id)
+            .ok_or(crate::TransportError::NoPath(peer))?;
+        let record = self
+            .secure_control
+            .get_mut(&path)
+            .ok_or(crate::CryptoError::HandshakeFailed("peer session not authenticated"))?
+            .seal(&message)?;
+        self.platform.send_reliable(path, &record)
+    }
+
+    #[cfg(feature = "crypto")]
+    fn handle_app_control(&mut self, path: crate::PathId, message: crate::crypto::AppControl) {
+        let Some(peer) = self.transport.peer_for_path(path) else { return };
+        match message {
+            crate::crypto::AppControl::CallRequest => {
+                let now = self.clock.now();
+                if matches!(self.call, CallState::Outgoing { peer: current, .. } if current == peer)
+                {
+                    self.call = self.call.resolve_glare(self.local_peer_id, peer, now);
+                    if self.call.is_active() {
+                        let _ = self.send_control(peer, crate::crypto::AppControl::CallAccept);
+                        self.start_audio();
+                    }
+                    self.announce_call();
+                } else {
+                    match self.call.ring(peer, now) {
+                        Ok(state) => {
+                            self.call = state;
+                            self.announce_call();
+                        }
+                        Err(_) => {
+                            let _ = self.send_control(peer, crate::crypto::AppControl::CallDecline);
+                        }
+                    }
+                }
+            }
+            crate::crypto::AppControl::CallAccept => match self.call.accepted(self.clock.now()) {
+                Ok(state) => {
+                    self.call = state;
+                    self.announce_call();
+                    self.start_audio();
+                }
+                Err(error) => self.emit_error_message("call", error.to_string()),
+            },
+            crate::crypto::AppControl::CallDecline => self.finish_remote_call(CallEnded::Declined),
+            crate::crypto::AppControl::CallEnd => self.finish_remote_call(CallEnded::HungUp),
+            crate::crypto::AppControl::Chat { id, body } => {
+                let message = Message::received(
+                    id,
+                    peer,
+                    Conversation::Direct(peer),
+                    &body,
+                    self.clock.now(),
+                );
+                self.history.record(message.clone());
+                self.sink.emit(Event::MessageReceived { message });
+                let _ = self.send_control(peer, crate::crypto::AppControl::ChatAck { id });
+            }
+            crate::crypto::AppControl::ChatAck { id } => {
+                if self.history.update_delivery(id, DeliveryState::Delivered) {
+                    self.sink
+                        .emit(Event::MessageDelivery { id, delivery: DeliveryState::Delivered });
+                }
+            }
+            crate::crypto::AppControl::RoomJoin { code } => {
+                self.handle_room_join_request(peer, &code);
+            }
+            crate::crypto::AppControl::RoomAccept { room_id, epoch } => {
+                self.handle_room_accept(peer, room_id, epoch);
+            }
+        }
+    }
+
+    #[cfg(feature = "crypto")]
+    fn handle_room_join_request(&mut self, peer: PeerId, code: &str) {
+        let Some(presented) = JoinCode::parse(code) else { return };
+        let Some(identity) = self.room_identity else { return };
+        let is_host = self.room.as_ref().is_some_and(|room| room.is_host);
+        if !is_host || presented != identity.join_code {
+            return;
+        }
+        let display_name = self
+            .known_peers
+            .get(peer)
+            .map(|known| known.display_name.clone())
+            .unwrap_or_else(|| "Nearby peer".into());
+        let now = self.clock.now();
+        let Some(room) = self.room.as_mut() else { return };
+        if room.participant(peer).is_none() {
+            let epoch = crate::Epoch(room.epoch.0 + 1);
+            let participant = crate::room::Participant::new(peer, display_name, now);
+            if room.add_participant(participant.clone(), epoch).is_ok() {
+                self.sink.emit(Event::ParticipantJoined { participant });
+            }
+        }
+        let epoch = room.epoch.0;
+        let room_id = *room.room_id.as_bytes();
+        let _ = self.send_control(peer, crate::crypto::AppControl::RoomAccept { room_id, epoch });
+    }
+
+    #[cfg(feature = "crypto")]
+    fn handle_room_accept(&mut self, host: PeerId, room_bytes: [u8; 16], epoch: u64) {
+        if self.room.is_some() || self.state != AppState::JoiningRoom {
+            return;
+        }
+        let Some(join_code) = self.pending_join_code.take() else { return };
+        let Some(profile) = self.profile.as_ref() else { return };
+        let host_name = self
+            .known_peers
+            .get(host)
+            .map(|known| known.display_name.clone())
+            .unwrap_or_else(|| "Room host".into());
+        let room_id = RoomId(room_bytes);
+        let participants = vec![
+            crate::room::Participant::new(self.local_peer_id, profile.display_name.clone(), self.clock.now()),
+            crate::room::Participant::new(host, host_name, self.clock.now()),
+        ];
+        let room = RoomState::joined(
+            room_id,
+            self.local_peer_id,
+            crate::Epoch(epoch),
+            participants,
+            None,
+            self.clock.now(),
+        );
+        self.room_identity = Some(RoomIdentity { room_id, join_code });
+        self.room = Some(room);
+        self.sink.emit(Event::RoomJoined {
+            room: self.room.as_ref().expect("room installed").snapshot(),
+        });
+        self.set_state(AppState::Connected);
+        self.start_audio();
     }
 
     fn on_captured_audio(&mut self, frame: &crate::audio::PcmFrame, now: Monotonic) {
@@ -1071,6 +1381,19 @@ impl Engine {
         }
         self.state = state;
         self.sink.emit(Event::StateChanged { state });
+    }
+
+    fn start_audio(&self) {
+        if !self.platform.capabilities().microphone {
+            let _ = self.platform.request_permission("microphone");
+            return;
+        }
+        if let Err(error) = self.platform.start_playback(&self.config.audio) {
+            self.emit_error("audio", &error);
+        }
+        if let Err(error) = self.platform.start_capture(&self.config.audio) {
+            self.emit_error("audio", &error);
+        }
     }
 
     fn emit_diagnostics(&mut self) {

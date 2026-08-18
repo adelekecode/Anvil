@@ -57,6 +57,21 @@ sealed class PlatformEvent {
         }.toString()
     }
 
+    data class AudioCaptured(
+        val samples: ShortArray,
+        val sampleRate: Int,
+        val channels: Int,
+        val timestamp: Long,
+    ) : PlatformEvent() {
+        override fun toJson(): String = JSONObject().apply {
+            put("type", "audioCaptured")
+            put("samples", JSONArray(samples.map { it.toInt() }))
+            put("sampleRate", sampleRate)
+            put("channels", channels)
+            put("timestamp", timestamp)
+        }.toString()
+    }
+
     data class NetworkChanged(val kind: String, val available: Boolean) : PlatformEvent() {
         override fun toJson(): String = JSONObject().apply {
             put("type", "networkChanged")
