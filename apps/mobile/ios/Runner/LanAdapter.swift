@@ -26,17 +26,20 @@ import Network
 /// another reason the advertisement carries a fingerprint rather than a key.
 ///
 /// PHASE1.
-final class LanAdapter {
+final class LanAdapter: NSObject, NetServiceDelegate {
 
     private let emit: (PlatformEvent) -> Void
     private var browser: NWBrowser?
-    private var listener: NWListener?
+    private var advertisedService: NetService?
     private let monitor = NWPathMonitor(requiredInterfaceType: .wifi)
     private let queue = DispatchQueue(label: "dev.anvil.lan")
     private var services: [String: NWEndpoint] = [:]
+    private var resolvers: [String: NetService] = [:]
+    private var pendingPayloads: [String: Data] = [:]
 
     init(emit: @escaping (PlatformEvent) -> Void) {
         self.emit = emit
+        super.init()
         monitor.pathUpdateHandler = { [weak self] path in
             self?.emit(.networkChanged(kind: "lan", available: path.status != .unsatisfied))
         }
@@ -96,44 +99,29 @@ final class LanAdapter {
     func stopDiscovery() {
         browser?.cancel()
         browser = nil
-        let handles = services.keys
+        let handles = Array(services.keys)
         services.removeAll()
         handles.forEach { emit(.peerAdvertisementLost(kind: "lan", handle: $0)) }
     }
 
     func advertise(_ payload: Data) {
         stopAdvertising()
-        let parameters = NWParameters.udp
-        parameters.includePeerToPeer = true
-        parameters.prohibitedInterfaceTypes = [.cellular]
-        do {
-            let listener = try NWListener(using: parameters)
-            listener.service = NWListener.Service(
-                name: nil,
-                type: Self.serviceType,
-                domain: nil,
-                txtRecord: NWTXTRecord([Self.txtKey: payload.base64EncodedString()])
-            )
-            listener.newConnectionHandler = { connection in
-                // The transport layer adopts inbound connections in the next
-                // step; rejecting here is preferable to silently retaining one.
-                connection.cancel()
-            }
-            listener.stateUpdateHandler = { state in
-                if case let .failed(error) = state {
-                    NSLog("Anvil: Bonjour listener failed: \(error)")
-                }
-            }
-            self.listener = listener
-            listener.start(queue: queue)
-        } catch {
-            NSLog("Anvil: could not advertise Bonjour service: \(error)")
-        }
+        let service = NetService(
+            domain: "local.",
+            type: "\(Self.serviceType).",
+            name: "",
+            port: Int32(Self.quicPort)
+        )
+        service.delegate = self
+        let encoded = Data(payload.base64EncodedString().utf8)
+        service.setTXTRecord(NetService.data(fromTXTRecord: [Self.txtKey: encoded]))
+        advertisedService = service
+        service.publish()
     }
 
     func stopAdvertising() {
-        listener?.cancel()
-        listener = nil
+        advertisedService?.stop()
+        advertisedService = nil
     }
 
     func connect(pathId: UInt64, address: String) {
@@ -150,29 +138,69 @@ final class LanAdapter {
 
         let handle = Self.handle(for: result.endpoint)
         services[handle] = result.endpoint
-        emit(
-            .peerAdvertised(
-                kind: "lan",
-                handle: handle,
-                address: handle,
-                payload: payload
-            )
-        )
+        pendingPayloads[handle] = payload
+        guard case let .service(name, type, domain, _) = result.endpoint else { return }
+        let resolver = NetService(domain: domain, type: type, name: name)
+        resolver.delegate = self
+        resolvers[handle] = resolver
+        resolver.resolve(withTimeout: 5)
     }
 
     private func lost(_ result: NWBrowser.Result) {
         let handle = Self.handle(for: result.endpoint)
         services.removeValue(forKey: handle)
+        resolvers.removeValue(forKey: handle)?.stop()
+        pendingPayloads.removeValue(forKey: handle)
         emit(.peerAdvertisementLost(kind: "lan", handle: handle))
     }
 
     private static func handle(for endpoint: NWEndpoint) -> String {
         switch endpoint {
-        case let .service(name, type, domain, _): return "\(name).\(type).\(domain)"
+        case let .service(name, type, domain, _): return handle(name: name, type: type, domain: domain)
         default: return String(describing: endpoint)
         }
     }
 
+    private static func handle(name: String, type: String, domain: String) -> String {
+        [name, type, domain]
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: ".")) }
+            .joined(separator: ".")
+    }
+
     private static let serviceType = "_anvil._udp"
     private static let txtKey = "anvil"
+    private static let quicPort = 47_820
+
+    func netServiceDidResolveAddress(_ sender: NetService) {
+        let handle = Self.handle(name: sender.name, type: sender.type, domain: sender.domain)
+        guard let payload = pendingPayloads[handle],
+              let data = sender.addresses?.first,
+              let address = Self.socketAddress(data, port: sender.port)
+        else { return }
+        emit(.peerAdvertised(kind: "lan", handle: handle, address: address, payload: payload))
+    }
+
+    func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
+        NSLog("Anvil: Bonjour resolve failed for \(sender.name): \(errorDict)")
+    }
+
+    private static func socketAddress(_ data: Data, port: Int) -> String? {
+        data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress?.assumingMemoryBound(to: sockaddr.self) else {
+                return nil
+            }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(
+                base,
+                socklen_t(base.pointee.sa_len),
+                &host,
+                socklen_t(host.count),
+                nil,
+                0,
+                NI_NUMERICHOST
+            ) == 0 else { return nil }
+            let value = String(cString: host)
+            return value.contains(":") ? "[\(value)]:\(port)" : "\(value):\(port)"
+        }
+    }
 }

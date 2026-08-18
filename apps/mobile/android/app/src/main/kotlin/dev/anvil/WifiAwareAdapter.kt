@@ -60,17 +60,22 @@ class WifiAwareAdapter(
         else context.getSystemService(Context.WIFI_AWARE_SERVICE) as? WifiAwareManager
     }
 
-    /** Whether Aware is usable *right now*, not merely supported. */
-    fun isAvailable(): Boolean = manager?.isAvailable == true
+    /** Whether Aware is usable *right now*, not merely supported.
+     *
+     * Keep this false until the Phase 4 adapter is implemented. Reporting the
+     * device capability as usable makes the core call the scaffold below on
+     * phones that support Aware, even though Anvil cannot use it yet.
+     */
+    fun isAvailable(): Boolean = false
 
     private fun supportsAware(): Boolean =
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
             context.packageManager.hasSystemFeature(PackageManager.FEATURE_WIFI_AWARE)
 
     fun startDiscovery() {
-        // PHASE4: attach(), then publish() + subscribe() with the Anvil service
-        // name. Emit PeerAdvertised on onServiceDiscovered.
-        TODO("Phase 4: Wi-Fi Aware attach, publish and subscribe")
+        // Defensive no-op. The core will not call this while isAvailable() is
+        // false, but an unfinished optional transport must never crash the app.
+        emit(PlatformEvent.NetworkChanged("wifi-aware", false))
     }
 
     fun stopDiscovery() {
@@ -92,7 +97,7 @@ class WifiAwareAdapter(
         // address encodes, requestNetwork, and emit PathEstablished with the
         // negotiated datagram size — or PathLost on failure. Do not retry here;
         // the core decides whether to try again.
-        TODO("Phase 4: Wi-Fi Aware data path")
+        emit(PlatformEvent.PathLost(pathId, "Wi-Fi Aware is not implemented"))
     }
 
     fun close(pathId: Long) = Unit

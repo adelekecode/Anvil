@@ -12,9 +12,20 @@ use anvil_core::{AudioConfig, PathId, PlatformAdapter, PlatformError, Result};
 /// Flutter creates the Rust session before its method channel can attach the
 /// Android/iOS object. Keeping this proxy stable means the engine never needs
 /// to be rebuilt and a detach cannot leave it holding a dead JNI/Swift object.
-#[derive(Default)]
 pub(crate) struct PlatformBridge {
     host: RwLock<Option<Arc<dyn PlatformAdapter>>>,
+    #[cfg(feature = "quic")]
+    quic: Option<Arc<crate::quic_transport::QuicTransport>>,
+}
+
+impl Default for PlatformBridge {
+    fn default() -> Self {
+        Self {
+            host: RwLock::new(None),
+            #[cfg(feature = "quic")]
+            quic: crate::quic_transport::QuicTransport::new().ok().map(Arc::new),
+        }
+    }
 }
 
 impl core::fmt::Debug for PlatformBridge {
@@ -26,6 +37,15 @@ impl core::fmt::Debug for PlatformBridge {
 }
 
 impl PlatformBridge {
+    pub(crate) fn set_engine_handle(&self, handle: anvil_core::EngineHandle) {
+        #[cfg(feature = "quic")]
+        if let Some(quic) = &self.quic {
+            quic.set_handle(handle);
+        }
+        #[cfg(not(feature = "quic"))]
+        let _ = handle;
+    }
+
     pub(crate) fn attach(&self, host: Arc<dyn PlatformAdapter>) {
         if let Ok(mut current) = self.host.write() {
             *current = Some(host);
@@ -70,18 +90,48 @@ impl DiscoveryAdapter for PlatformBridge {
 
 impl TransportAdapter for PlatformBridge {
     fn connect(&self, path: PathId, endpoint: &Endpoint) -> Result<()> {
+        #[cfg(feature = "quic")]
+        if endpoint.kind == PathKind::Lan {
+            if let Some(quic) = &self.quic {
+                return quic.connect(path, endpoint);
+            }
+        }
         self.host()?.connect(path, endpoint)
     }
     fn close(&self, path: PathId) -> Result<()> {
+        #[cfg(feature = "quic")]
+        if let Some(quic) = &self.quic {
+            if quic.has_path(path) {
+                return quic.close(path);
+            }
+        }
         self.host().map_or(Ok(()), |host| host.close(path))
     }
     fn send_datagram(&self, path: PathId, data: &[u8]) -> Result<()> {
+        #[cfg(feature = "quic")]
+        if let Some(quic) = &self.quic {
+            if quic.has_path(path) {
+                return quic.send_datagram(path, data);
+            }
+        }
         self.host()?.send_datagram(path, data)
     }
     fn send_reliable(&self, path: PathId, data: &[u8]) -> Result<()> {
+        #[cfg(feature = "quic")]
+        if let Some(quic) = &self.quic {
+            if quic.has_path(path) {
+                return quic.send_reliable(path, data);
+            }
+        }
         self.host()?.send_reliable(path, data)
     }
     fn listen(&self, kind: PathKind) -> Result<Endpoint> {
+        #[cfg(feature = "quic")]
+        if kind == PathKind::Lan {
+            if let Some(quic) = &self.quic {
+                return quic.listen(kind);
+            }
+        }
         self.host()?.listen(kind)
     }
 }

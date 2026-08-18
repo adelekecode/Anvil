@@ -2,6 +2,7 @@ package dev.anvil
 
 import android.content.Context
 import android.media.AudioManager
+import android.util.Log
 
 /**
  * Microphone capture and speaker playback on Android.
@@ -48,7 +49,7 @@ class AudioAdapter(
     fun startCapture(sampleRateHz: Int, channels: Int, frameMillis: Int) {
         // PHASE1: AudioRecord with MediaRecorder.AudioSource.VOICE_COMMUNICATION,
         // read on a dedicated thread at frameMillis cadence, emit AudioCaptured.
-        TODO("Phase 1: AudioRecord capture")
+        Log.w(TAG, "Audio capture is not implemented; ignoring start request")
     }
 
     fun stopCapture() {
@@ -57,7 +58,7 @@ class AudioAdapter(
 
     fun startPlayback(sampleRateHz: Int, channels: Int) {
         // PHASE1: AudioTrack in streaming mode, low-latency performance mode.
-        TODO("Phase 1: AudioTrack playback")
+        Log.w(TAG, "Audio playback is not implemented; ignoring start request")
     }
 
     fun stopPlayback() {
@@ -67,5 +68,9 @@ class AudioAdapter(
     fun play(samples: ShortArray) {
         // PHASE1: AudioTrack.write. Must not block past the frame duration —
         // overrunning it is an underrun the user hears.
+    }
+
+    private companion object {
+        const val TAG = "AnvilAudio"
     }
 }

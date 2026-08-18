@@ -81,6 +81,14 @@ pub enum PlatformEvent {
         data: Vec<u8>,
     },
 
+    /// Reliable, ordered control bytes arrived on a QUIC stream.
+    ReliableReceived {
+        /// Path carrying the authenticated transport session.
+        path: PathId,
+        /// One complete control message.
+        data: Vec<u8>,
+    },
+
     /// The device's network situation changed — Wi-Fi joined or left, interface
     /// up or down, Aware availability toggled.
     ///

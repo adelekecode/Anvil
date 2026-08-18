@@ -196,7 +196,7 @@ class LanAdapter(
     fun connect(pathId: Long, address: String) {
         // PHASE1: open a QUIC connection over a socket bound to the Wi-Fi
         // Network, then emit PathEstablished or PathLost carrying pathId.
-        TODO("Phase 1: LAN QUIC connect")
+        emit(PlatformEvent.PathLost(pathId, "LAN transport is not implemented"))
     }
 
     fun close(pathId: Long) = Unit
@@ -224,12 +224,17 @@ class LanAdapter(
                         return
                     }
                     val host = serviceInfo.host?.hostAddress ?: return
+                    val socketAddress = if (host.contains(':')) {
+                        "[$host]:${serviceInfo.port}"
+                    } else {
+                        "$host:${serviceInfo.port}"
+                    }
                     synchronized(visibleHandles) { visibleHandles.add(serviceInfo.serviceName) }
                     emit(
                         PlatformEvent.PeerAdvertised(
                             kind = "lan",
                             handle = serviceInfo.serviceName,
-                            address = "$host:${serviceInfo.port}",
+                            address = socketAddress,
                             payload = payload,
                         ),
                     )

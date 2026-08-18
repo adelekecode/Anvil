@@ -58,6 +58,8 @@ mod android_platform;
 mod apple_platform;
 mod convert;
 mod platform_bridge;
+#[cfg(feature = "quic")]
+mod quic_transport;
 
 use convert::{command_from_json, event_to_json, platform_event_from_json};
 use platform_bridge::PlatformBridge;
@@ -151,6 +153,7 @@ impl AnvilSession {
             Arc::new(SystemClock::new()),
             local_peer_id,
         );
+        platform.set_engine_handle(handle.clone());
 
         let thread = std::thread::Builder::new()
             .name("anvil-engine".into())

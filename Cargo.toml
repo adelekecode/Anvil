@@ -30,6 +30,8 @@ sha2 = "0.10"
 # --- transport (feature `quic`) --------------------------------------------
 quinn = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+rcgen = "0.13"
 
 # --- audio (feature `opus`) ------------------------------------------------
 # NOTE: pulls in libopus via a C build. Kept off by default so the workspace

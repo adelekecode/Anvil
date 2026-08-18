@@ -40,7 +40,7 @@ use crate::audio::{JitterBuffer, Mixer, VoiceActivityDetector};
 use crate::chat::{Conversation, DeliveryState, History, Message};
 use crate::crypto::{DeviceIdentity, SenderKeyManager};
 use crate::diagnostics::Counters;
-use crate::discovery::PeerTable;
+use crate::discovery::{Fingerprint as DiscoveryFingerprint, PeerTable};
 use crate::identity::{KnownPeers, LocalProfile, PublicIdentity, TofuOutcome};
 use crate::peer::{CallEnded, CallState};
 use crate::platform::{NullPlatform, PlatformAdapter, PlatformEvent};
@@ -56,6 +56,14 @@ use crate::{AnvilConfig, AppState, Event, EventSink, PeerId, RoomId};
 /// re-evaluation, heartbeats and expiry, and anything slower would make playout
 /// jittery on its own.
 const TICK: core::time::Duration = core::time::Duration::from_millis(20);
+
+fn provisional_peer_id(fingerprint: DiscoveryFingerprint) -> PeerId {
+    let mut bytes = [0u8; 32];
+    bytes[..fingerprint.len()].copy_from_slice(&fingerprint);
+    // Domain-separate this routing-only sentinel from any ordinary padded key.
+    bytes[31] = 0xA1;
+    PeerId(bytes)
+}
 
 /// Something the host asks the engine to do (§8).
 #[derive(Debug)]
@@ -204,6 +212,9 @@ pub struct Engine {
     history: History,
 
     peers: PeerTable,
+    /// QUIC paths opened from unauthenticated discovery sightings, keyed until
+    /// the identity handshake promotes them to a real peer id.
+    pending_paths: std::collections::HashMap<crate::PathId, DiscoveryFingerprint>,
     transport: TransportManager,
     room: Option<RoomState>,
     /// Room id plus the human-facing join code, for a room we host or joined.
@@ -269,6 +280,7 @@ impl Engine {
             call: CallState::Idle,
             history: History::new(),
             peers: PeerTable::new(),
+            pending_paths: std::collections::HashMap::new(),
             room: None,
             room_identity: None,
             relay_monitor: None,
@@ -472,7 +484,11 @@ impl Engine {
         let mut started = false;
 
         if capabilities.lan {
-            match self.platform.start_lan_discovery() {
+            match self
+                .platform
+                .listen(crate::transport::PathKind::Lan)
+                .and_then(|_| self.platform.start_lan_discovery())
+            {
                 Ok(()) => started = true,
                 Err(e) => self.emit_error("platform", &e),
             }
@@ -894,11 +910,31 @@ impl Engine {
 
         match event {
             PlatformEvent::PeerAdvertised { advertisement } => {
+                if self.profile.as_ref().is_some_and(|profile| {
+                    PublicIdentity::new(profile.public_key).fingerprint()
+                        == advertisement.advertisement.fingerprint
+                }) {
+                    return;
+                }
                 let outcome = self.peers.observe(&advertisement, now);
                 if let Some(peer) = self.peers.get(&advertisement.advertisement.fingerprint) {
                     // Emit once per peer, not once per path (§65).
                     if outcome != crate::discovery::SightingOutcome::Refreshed {
                         self.sink.emit(Event::PeerDiscovered { peer: peer.clone() });
+                    }
+                }
+                if outcome != crate::discovery::SightingOutcome::Refreshed {
+                    let provisional = provisional_peer_id(advertisement.advertisement.fingerprint);
+                    let path = self.transport.add_candidate(
+                        provisional,
+                        advertisement.endpoint.clone(),
+                        0,
+                        now,
+                    );
+                    self.pending_paths.insert(path, advertisement.advertisement.fingerprint);
+                    if let Err(error) = self.platform.connect(path, &advertisement.endpoint) {
+                        self.emit_error("transport", &error);
+                        let _ = self.transport.on_lost(path, now);
                     }
                 }
             }
@@ -929,6 +965,10 @@ impl Engine {
 
             PlatformEvent::DatagramReceived { path, data } => {
                 self.on_datagram(path, &data);
+            }
+
+            PlatformEvent::ReliableReceived { path, data } => {
+                self.on_reliable(path, &data);
             }
 
             PlatformEvent::NetworkChanged { kind, available } => {
@@ -990,6 +1030,13 @@ impl Engine {
                 tracing::trace!(error = %e, "malformed datagram discarded");
             }
         }
+    }
+
+    fn on_reliable(&mut self, path: crate::PathId, data: &[u8]) {
+        // The transport guarantees message boundaries by using one QUIC
+        // unidirectional stream per control record. Authentication and control
+        // decoding are layered here in the next handshake step.
+        tracing::trace!(?path, bytes = data.len(), "reliable control record received");
     }
 
     fn on_captured_audio(&mut self, frame: &crate::audio::PcmFrame, now: Monotonic) {
