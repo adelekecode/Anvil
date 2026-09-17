@@ -5,8 +5,6 @@
 //! every expensive operation — resampling, encoding, decoding — happens
 //! here on ordinary threads.
 
-use std::sync::Arc;
-
 use crate::audio::opus::{OpusVoiceDecoder, OpusVoiceEncoder};
 use crate::audio::resampler::AudioResampler;
 use crate::audio::ring_buffer::PcmRingBuffer;
@@ -67,15 +65,17 @@ impl CapturePipeline {
         let frame_size = self.encoder.frame_samples_per_channel();
         frame_buffer.resize(frame_size * 2, 0);
 
-        let read = ring.read(frame_buffer);
-        if read > 0 {
+        loop {
+            let read = ring.read(frame_buffer);
+            if read == 0 {
+                break;
+            }
             self.resampler.push(&frame_buffer[..read]);
-        }
-
-        while let Some(mono) = self.resampler.drain_frame() {
-            let encoded = self.encoder.encode_frame(&mono)?;
-            if !encoded.is_empty() {
-                out.push(encoded.payload);
+            while let Some(mono) = self.resampler.drain_frame() {
+                let encoded = self.encoder.encode_frame(&mono)?;
+                if !encoded.is_empty() {
+                    out.push(encoded.payload);
+                }
             }
         }
         Ok(out)
@@ -112,27 +112,18 @@ impl core::fmt::Debug for CapturePipeline {
 /// to the ring buffer for the CPAL output callback to consume.
 pub struct PlaybackPipeline {
     decoder: OpusVoiceDecoder,
-    /// Scratch buffer reused across decode calls.
-    decode_scratch: Vec<i16>,
 }
 
 impl PlaybackPipeline {
     /// Build from an already-configured decoder.
     #[must_use]
     pub fn new(decoder: OpusVoiceDecoder) -> Self {
-        Self {
-            decoder,
-            decode_scratch: Vec::new(),
-        }
+        Self { decoder }
     }
 
     /// Decode one Opus packet and push its PCM to the ring buffer.
     /// Returns the number of samples pushed.
-    pub fn decode_and_push(
-        &mut self,
-        packet: &[u8],
-        ring: &PcmRingBuffer,
-    ) -> Result<usize> {
+    pub fn decode_and_push(&mut self, packet: &[u8], ring: &PcmRingBuffer) -> Result<usize> {
         let decoded = self.decoder.decode_frame(Some(packet), false)?;
         let len = decoded.samples.len();
         ring.write(&decoded.samples);
@@ -162,9 +153,7 @@ impl PlaybackPipeline {
 
 impl core::fmt::Debug for PlaybackPipeline {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("PlaybackPipeline")
-            .field("decoder", &self.decoder)
-            .finish_non_exhaustive()
+        f.debug_struct("PlaybackPipeline").field("decoder", &self.decoder).finish_non_exhaustive()
     }
 }
 
@@ -172,6 +161,7 @@ impl core::fmt::Debug for PlaybackPipeline {
 mod tests {
     use super::*;
     use crate::audio::opus::OpusConfig;
+    use std::sync::Arc;
 
     fn voice_config() -> OpusConfig {
         OpusConfig {

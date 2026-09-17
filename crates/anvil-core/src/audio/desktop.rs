@@ -22,11 +22,12 @@ use std::thread;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
 
-use crate::audio::opus::{OpusConfig, OpusVoiceDecoder, OpusVoiceEncoder};
-use crate::audio::pipeline::{CapturePipeline, PlaybackPipeline};
+use crate::audio::opus::{OpusConfig, OpusVoiceEncoder};
+use crate::audio::pipeline::CapturePipeline;
 use crate::audio::ring_buffer::PcmRingBuffer;
 use crate::{AudioError, Result};
 
+/// A desktop capture/playback loop backed by CPAL.
 pub struct CpalLoop {
     capture_stream: Option<Stream>,
     playback_stream: Option<Stream>,
@@ -39,6 +40,7 @@ pub struct CpalLoop {
 }
 
 impl CpalLoop {
+    /// Build a stopped loop using the default voice configuration.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -63,6 +65,7 @@ impl CpalLoop {
     }
 
     #[must_use]
+    /// Whether both the capture and playback workers are active.
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::Acquire)
     }
@@ -115,9 +118,7 @@ impl CpalLoop {
             )
             .map_err(|e| AudioError::CaptureUnavailable(format!("{e:?}")))?;
 
-        cap_stream
-            .play()
-            .map_err(|e| AudioError::CaptureUnavailable(format!("{e:?}")))?;
+        cap_stream.play().map_err(|e| AudioError::CaptureUnavailable(format!("{e:?}")))?;
 
         // --- capture worker ------------------------------------------------
         let cap_ring = self.capture_ring.clone();
@@ -180,23 +181,12 @@ impl CpalLoop {
             )
             .map_err(|e| AudioError::PlaybackUnavailable(format!("{e:?}")))?;
 
-        pb_stream
-            .play()
-            .map_err(|e| AudioError::PlaybackUnavailable(format!("{e:?}")))?;
+        pb_stream.play().map_err(|e| AudioError::PlaybackUnavailable(format!("{e:?}")))?;
 
         // --- playback worker -----------------------------------------------
         let pb_ring = self.playback_ring.clone();
         let pb_running = self.running.clone();
-        let cfg = self.opus_config;
         self.playback_thread = Some(thread::spawn(move || {
-            let dec = match OpusVoiceDecoder::new(cfg) {
-                Ok(dec) => dec,
-                Err(e) => {
-                    tracing::error!("playback pipeline init: {e}");
-                    return;
-                }
-            };
-            let mut pipeline = PlaybackPipeline::new(dec);
             while pb_running.load(Ordering::Acquire) {
                 // Phase 3: receive decrypted AudioPackets here.
                 // For the self-test loop, write silence so the

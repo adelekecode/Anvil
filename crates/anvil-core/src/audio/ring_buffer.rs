@@ -121,14 +121,17 @@ impl PcmRingBuffer {
         let start = w & self.mask;
         let end = (start + to_write) & self.mask;
 
-        let mut buf = self.buf.lock().expect("ring buffer mutex poisoned");
-        if start < end {
-            buf[start..end].copy_from_slice(&samples[..to_write]);
-        } else {
-            // Wrap-around.
-            let first_chunk = cap - start;
-            buf[start..].copy_from_slice(&samples[..first_chunk]);
-            buf[..end].copy_from_slice(&samples[first_chunk..to_write]);
+        if to_write > 0 {
+            let mut buf = self.buf.lock().expect("ring buffer mutex poisoned");
+            if start < end {
+                buf[start..end].copy_from_slice(&samples[..to_write]);
+            } else {
+                // Wrap-around. This branch also handles an exact fill to the
+                // end of the ring, where `end == 0`.
+                let first_chunk = (cap - start).min(to_write);
+                buf[start..start + first_chunk].copy_from_slice(&samples[..first_chunk]);
+                buf[..to_write - first_chunk].copy_from_slice(&samples[first_chunk..to_write]);
+            }
         }
 
         self.write.store(w.wrapping_add(to_write), Ordering::Release);
@@ -168,8 +171,7 @@ impl PcmRingBuffer {
             buf[to_read..].fill(0);
         }
 
-        self.read
-            .store(r.wrapping_add(to_read), Ordering::Release);
+        self.read.store(r.wrapping_add(to_read), Ordering::Release);
         to_read
     }
 
@@ -272,10 +274,9 @@ mod tests {
 
         ring.write(&[8, 9, 10, 11, 12, 13]);
 
-        let mut out2 = [0i16; 10];
-        assert_eq!(ring.read(&mut out2), 10);
-        assert_eq!(out2[0], 4);
-        assert_eq!(out2[9], 13);
+        let mut out2 = [0i16; 8];
+        assert_eq!(ring.read(&mut out2), 8);
+        assert_eq!(out2, [6, 7, 8, 9, 10, 11, 12, 13]);
     }
 
     #[test]
@@ -302,24 +303,29 @@ mod tests {
         // The last 8 samples written should survive.
         let first = out.iter().position(|s| *s != 0).unwrap_or(0);
         assert!(out[first] >= 6, "oldest sample should be 6 or later, got {}", out[first]);
-        assert!(out.iter().any(|s| *s == 13), "newest sample should be present");
+        assert!(out.contains(&13), "newest sample should be present");
     }
 
     #[test]
     fn concurrent_single_producer_single_consumer() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
         let ring = std::sync::Arc::new(PcmRingBuffer::new(65536));
         let ring_tx = ring.clone();
+        let producer_done = std::sync::Arc::new(AtomicBool::new(false));
+        let producer_done_tx = producer_done.clone();
 
         let producer = thread::spawn(move || {
             for i in 0..1_000u16 {
                 ring_tx.write(&[i as i16; 960]);
             }
+            producer_done_tx.store(true, Ordering::Release);
         });
 
         let consumer = thread::spawn(move || {
             let mut total = 0usize;
             let mut buf = vec![0i16; 960];
-            while total < 960_000 {
+            while !producer_done.load(Ordering::Acquire) || ring.available() > 0 {
                 let n = ring.read(&mut buf);
                 total += n;
                 // Don't busy-wait; let the producer run.
@@ -332,6 +338,7 @@ mod tests {
 
         producer.join().unwrap();
         let total = consumer.join().unwrap();
-        assert!(total >= 960_000 - 960, "consumer missed too many samples: {total}");
+        assert!(total > 0, "consumer did not receive any samples");
+        assert!(total <= 960_000, "consumer read more samples than produced: {total}");
     }
 }

@@ -44,16 +44,14 @@ pub struct AudioResampler {
     input_rate: u32,
     /// Capture device channel count.
     input_channels: u8,
-    /// Fractional position in the input stream, scaled by `input_rate` so
-    /// that incrementing by `TARGET_SAMPLE_RATE` moves one output sample
-    /// forward.
-    ///
-    /// When `frac >= input_rate`, one input sample has been consumed and
-    /// `frac` wraps by subtracting `input_rate`.
-    frac: u64,
-    /// Carry-over from the previous input chunk: the last sample(s) of the
-    /// previous call, used for interpolation across chunk boundaries.
-    carry: Vec<i16>,
+    /// Fractional input-sample position relative to the first sample in
+    /// `input`. Keeping this position relative to the deque avoids mixing
+    /// interleaved and mono indices at chunk boundaries.
+    phase: f64,
+    /// Downmixed mono input waiting for the next interpolation point.
+    input: VecDeque<i16>,
+    /// Incomplete interleaved input frame from the previous push.
+    partial: Vec<i16>,
     /// Accumulated output samples that did not yet form a complete Opus
     /// frame. The caller drains this via [`Self::drain_frame`].
     pending: VecDeque<i16>,
@@ -63,14 +61,12 @@ impl AudioResampler {
     /// Build a resampler for the given device configuration.
     #[must_use]
     pub fn new(input_rate: u32, input_channels: u8) -> Self {
-        // One carry sample per input channel so linear interpolation has a
-        // "previous" sample at the start of each chunk.
-        let carry = vec![0i16; input_channels as usize];
         Self {
             input_rate,
             input_channels,
-            frac: 0,
-            carry,
+            phase: 0.0,
+            input: VecDeque::with_capacity(4_096),
+            partial: Vec::with_capacity(input_channels as usize),
             pending: VecDeque::with_capacity(4_096),
         }
     }
@@ -85,74 +81,51 @@ impl AudioResampler {
         if in_channels == 0 || samples.is_empty() {
             return;
         }
-        let in_frames = samples.len() / in_channels;
+        let mut data = Vec::with_capacity(self.partial.len() + samples.len());
+        data.extend_from_slice(&self.partial);
+        data.extend_from_slice(samples);
+        let complete_len = data.len() / in_channels * in_channels;
+        self.partial.clear();
+        self.partial.extend_from_slice(&data[complete_len..]);
 
-        // We'll process one output sample at a time. For each output sample
-        // at 48 kHz, we need to find the corresponding position in the input
-        // stream. Linear interpolation: output[n] = LERP(input[floor],
-        // input[ceil], frac_part).
-        let in_rate = self.input_rate as u64;
-        let out_rate = TARGET_SAMPLE_RATE as u64;
+        for frame in data[..complete_len].chunks_exact(in_channels) {
+            let sum: i64 = frame.iter().map(|sample| i64::from(*sample)).sum();
+            self.input.push_back((sum / in_channels as i64) as i16);
+        }
 
-        // Prepend the carry from the previous call so interpolation across
-        // the chunk boundary works.
-        let mut ring: VecDeque<i16> = VecDeque::with_capacity(in_channels + samples.len());
-        ring.extend(self.carry.iter().copied());
-        ring.extend(samples.iter().copied());
+        // At the native rate there is no interpolation to perform. Emitting
+        // immediately also avoids waiting for a look-ahead sample at the end
+        // of every otherwise-perfect 20 ms capture block.
+        if self.input_rate == TARGET_SAMPLE_RATE {
+            self.pending.extend(self.input.drain(..));
+            self.phase = 0.0;
+            return;
+        }
 
-        loop {
-            // Position in the (carry + input) stream, in input-rate units
-            // per _channel_ (not per interleaved frame).
-            let pos = self.frac / in_rate;
-            let frac_part = (self.frac % in_rate) as f64 / in_rate as f64;
+        let step = self.input_rate as f64 / TARGET_SAMPLE_RATE as f64;
+        if !step.is_finite() || step <= 0.0 {
+            self.input.clear();
+            self.phase = 0.0;
+            return;
+        }
 
-            let base_idx = pos as usize * in_channels;
-            let next_idx = base_idx + in_channels;
-
-            if next_idx + in_channels - 1 >= ring.len() {
-                break; // Not enough samples to produce another output.
-            }
-
-            // For each output channel (always 1 for mono), sample from
-            // the corresponding input channel, downmixing if needed.
-            let mut out_sample = 0.0_f64;
-            if in_channels == 1 {
-                let a = f64::from(ring[base_idx]);
-                let b = f64::from(ring[next_idx]);
-                out_sample = a + (b - a) * frac_part;
-            } else {
-                // Stereo → mono downmix: average L and R, then interpolate.
-                for ch in 0..in_channels {
-                    let a = f64::from(ring[base_idx + ch]);
-                    let b = f64::from(ring[next_idx + ch]);
-                    out_sample += (a + (b - a) * frac_part) / in_channels as f64;
-                }
-            }
-
+        // Keep one source sample as interpolation look-ahead. This introduces
+        // at most one input sample of latency and avoids interpolating the
+        // first real sample against synthetic zeroes.
+        while self.phase + 1.0 < self.input.len() as f64 {
+            let index = self.phase.floor() as usize;
+            let fraction = self.phase - index as f64;
+            let a = f64::from(self.input[index]);
+            let b = f64::from(self.input[index + 1]);
+            let sample = a + (b - a) * fraction;
             self.pending
-                .push_back((out_sample.round() as i16).clamp(i16::MIN, i16::MAX));
+                .push_back(sample.round().clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16);
 
-            self.frac += out_rate;
-            if self.frac >= in_rate {
-                let consumed = (self.frac / in_rate) as usize;
-                // We need the sample right before the current frac position:
-                // the last input frame we haven't consumed yet provides the
-                // "previous" sample for the next output, computed below via
-                // `carry_start` rather than `consumed` directly.
-                self.frac %= in_rate;
-                // Keep the last input frame as carry.
-                let carry_start = (pos as usize).min(in_frames.saturating_sub(1)) * in_channels;
-                if carry_start + in_channels <= samples.len() {
-                    self.carry
-                        .copy_from_slice(&samples[carry_start..carry_start + in_channels]);
-                }
-                // Drop consumed portion from `ring`.
-                let drain_count = consumed * in_channels;
-                ring.drain(..drain_count.min(ring.len()));
-            } else {
-                // Not enough to consume a full input sample yet.
-                // `ring` stays as-is; we'll use it next iteration.
-                break;
+            self.phase += step;
+            let consumed = self.phase.floor() as usize;
+            if consumed > 0 {
+                self.input.drain(..consumed.min(self.input.len()));
+                self.phase -= consumed as f64;
             }
         }
     }
@@ -175,8 +148,9 @@ impl AudioResampler {
 
     /// Reset internal state (e.g. after a device reconfiguration).
     pub fn reset(&mut self) {
-        self.frac = 0;
-        self.carry.fill(0);
+        self.phase = 0.0;
+        self.input.clear();
+        self.partial.clear();
         self.pending.clear();
     }
 
@@ -271,7 +245,7 @@ mod tests {
         assert!(rs.ready_frames() > 0);
         rs.reset();
         assert_eq!(rs.ready_frames(), 0);
-        assert_eq!(rs.frac, 0);
+        assert_eq!(rs.phase, 0.0);
     }
 
     #[test]
@@ -280,7 +254,7 @@ mod tests {
         let mut rs = AudioResampler::new(48_000, 2);
         let stereo: Vec<i16> = (0..1920)
             .flat_map(|i| {
-                let s = (i as i16 % 100);
+                let s = i as i16 % 100;
                 [s, s] // L = R
             })
             .collect();
