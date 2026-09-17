@@ -14,13 +14,13 @@
 //! is checked at startup and re-checked on every
 //! [`crate::PlatformEvent::NetworkChanged`] for exactly this reason.
 //!
-//! **Cross-platform interop is the risk, not per-platform bring-up.** Android
-//! and iOS each speak Aware; whether an Android publisher and an iOS subscriber
-//! find each other, agree a data path, and carry IPv6 link-local UDP between
-//! them is an empirical question. Phase 5 (§105) should be scheduled as an
-//! investigation with a real possibility of a negative result, and the fallback
-//! — one platform hosting a local group that the other joins as a LAN — should
-//! be sketched before it is needed rather than after.
+//! **Cross-platform interop is the risk.** Android exposes
+//! `WifiAwareSession`; iOS does not expose a public Android-style NAN API to
+//! third-party apps. The Android adapter therefore uses the bidirectional
+//! discovery-session message channel, while iOS keeps this capability false
+//! and uses its Network.framework LAN adapter with peer-to-peer/AWDL enabled.
+//! The room, crypto and media protocol remain identical; only radio discovery
+//! differs.
 //!
 //! **Addressing is IPv6 link-local, scoped to the Aware interface.** Addresses
 //! are meaningless without their scope id, and they change between sessions.

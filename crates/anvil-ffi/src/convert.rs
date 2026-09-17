@@ -136,6 +136,10 @@ pub fn platform_event_from_json(text: &str) -> Option<PlatformEvent> {
             path: PathId(value.get("pathId")?.as_u64()?),
             data: byte_array(value.get("data")?)?,
         },
+        "reliableReceived" => PlatformEvent::ReliableReceived {
+            path: PathId(value.get("pathId")?.as_u64()?),
+            data: byte_array(value.get("data")?)?,
+        },
         "networkChanged" => PlatformEvent::NetworkChanged {
             kind: path_kind(value.get("kind")?.as_str()?)?,
             available: value.get("available")?.as_bool()?,
@@ -500,6 +504,20 @@ fn room_id_from_hex(text: &str) -> Option<RoomId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aware_transport_events_parse_from_native_json() {
+        let datagram = platform_event_from_json(
+            r#"{"type":"datagramReceived","pathId":7,"data":[65,110,118,105,108]}"#,
+        );
+        assert!(matches!(datagram, Some(PlatformEvent::DatagramReceived { path, data })
+            if path == PathId(7) && data == b"Anvil"));
+
+        let reliable =
+            platform_event_from_json(r#"{"type":"reliableReceived","pathId":7,"data":[111,107]}"#);
+        assert!(matches!(reliable, Some(PlatformEvent::ReliableReceived { path, data })
+            if path == PathId(7) && data == b"ok"));
+    }
 
     #[test]
     fn every_simple_command_parses() {

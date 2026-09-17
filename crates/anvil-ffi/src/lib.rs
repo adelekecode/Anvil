@@ -164,6 +164,28 @@ impl AnvilSession {
     }
 }
 
+/// Install a panic hook that writes the panic message and a captured
+/// backtrace to stderr, which Android routes to logcat.
+///
+/// Without this, a panic on a Rust thread like `anvil-quic` — where the
+/// panic hook runs on a worker thread inside the tokio runtime — surfaces
+/// only as a bare SIGABRT tombstone full of raw `base.apk` addresses and no
+/// source line. The hook fires before unwinding starts, so even a panic
+/// that later becomes a double-panic abort still leaves the first panic's
+/// message and backtrace in the log.
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let thread = std::thread::current().name().unwrap_or("unknown").to_string();
+        let location = info
+            .location()
+            .map(|loc| loc.to_string())
+            .unwrap_or_else(|| "unknown location".to_string());
+        eprintln!("\n[anvil] Rust panic on thread `{thread}` at {location}: {info}");
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        eprintln!("[anvil] backtrace:\n{backtrace}");
+    }));
+}
+
 /// Start an Anvil node.
 ///
 /// `config_json` may be null for defaults. Returns an opaque handle, or null on
@@ -173,6 +195,8 @@ impl AnvilSession {
 /// `config_json`, if non-null, must be a valid NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn anvil_init(config_json: *const c_char) -> *mut AnvilSession {
+    install_panic_hook();
+
     let result = std::panic::catch_unwind(|| {
         let config = if config_json.is_null() {
             AnvilConfig::default()
@@ -263,6 +287,52 @@ pub unsafe extern "C" fn anvil_submit_platform_event(
     result.unwrap_or(ANVIL_ERR_PANIC)
 }
 
+/// Submit one captured PCM frame without serialising samples through JSON.
+///
+/// Audio is high-rate data: at 20 ms frames this entry point is called about 50
+/// times per second. Keeping it separate from the control/event JSON boundary
+/// avoids a large allocation and parse on every native audio callback.
+///
+/// # Safety
+/// `session` must come from [`anvil_init`]. If `sample_count` is non-zero,
+/// `samples` must point to at least that many readable `i16` values for the
+/// duration of this call.
+#[no_mangle]
+pub unsafe extern "C" fn anvil_submit_audio(
+    session: *const AnvilSession,
+    samples: *const i16,
+    sample_count: usize,
+    sample_rate_hz: u32,
+    channels: u8,
+    timestamp: u32,
+) -> c_int {
+    if session.is_null() || (sample_count > 0 && samples.is_null()) || channels == 0 {
+        return ANVIL_ERR_INVALID_ARG;
+    }
+
+    let result = std::panic::catch_unwind(|| {
+        let session = unsafe { &*session };
+        let samples = if sample_count == 0 {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(samples, sample_count) }.to_vec()
+        };
+        let frame = anvil_core::audio::PcmFrame::new(
+            samples,
+            sample_rate_hz,
+            channels,
+            anvil_core::MediaTimestamp(timestamp),
+        );
+        if session.handle.platform(anvil_core::PlatformEvent::AudioCaptured { frame }) {
+            ANVIL_OK
+        } else {
+            ANVIL_ERR_ENGINE_STOPPED
+        }
+    });
+
+    result.unwrap_or(ANVIL_ERR_PANIC)
+}
+
 /// JNI entry point used by `dev.anvil.AnvilPlatform.nativeSubmitEvent`.
 #[cfg(target_os = "android")]
 #[no_mangle]
@@ -283,6 +353,44 @@ pub unsafe extern "system" fn Java_dev_anvil_AnvilPlatform_nativeSubmitEvent(
     };
 
     unsafe { anvil_submit_platform_event(session as *const AnvilSession, text.as_ptr()) }
+}
+
+/// JNI entry point used by `dev.anvil.AnvilPlatform.nativeSubmitAudio`.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub unsafe extern "system" fn Java_dev_anvil_AnvilPlatform_nativeSubmitAudio(
+    env: jni::JNIEnv,
+    _this: jni::objects::JObject,
+    session: jni::sys::jlong,
+    samples: jni::objects::JShortArray,
+    sample_rate_hz: jni::sys::jint,
+    channels: jni::sys::jint,
+    timestamp: jni::sys::jlong,
+) -> jni::sys::jint {
+    if session == 0 || sample_rate_hz <= 0 || channels <= 0 || timestamp < 0 {
+        return ANVIL_ERR_INVALID_ARG;
+    }
+    let Ok(length) = env.get_array_length(&samples) else {
+        return ANVIL_ERR_INVALID_ARG;
+    };
+    let Ok(mut values) = usize::try_from(length).map(|length| vec![0i16; length]) else {
+        return ANVIL_ERR_INVALID_ARG;
+    };
+    if env.get_short_array_region(&samples, 0, &mut values).is_err() {
+        let _ = env.exception_clear();
+        return ANVIL_ERR_INVALID_ARG;
+    }
+
+    unsafe {
+        anvil_submit_audio(
+            session as *const AnvilSession,
+            values.as_ptr(),
+            values.len(),
+            sample_rate_hz as u32,
+            channels as u8,
+            timestamp as u32,
+        )
+    }
 }
 
 /// Attach the Kotlin platform object to the already-running Rust session.

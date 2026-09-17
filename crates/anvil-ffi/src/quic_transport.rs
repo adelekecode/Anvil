@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
@@ -22,7 +23,11 @@ pub(crate) struct QuicTransport {
     runtime: Arc<tokio::runtime::Runtime>,
     endpoint: Mutex<Option<Endpoint>>,
     outgoing: Arc<Mutex<HashMap<PathId, (SocketAddr, Connection)>>>,
-    pending_inbound: Arc<Mutex<HashMap<SocketAddr, Vec<Connection>>>>,
+    /// Inbound QUIC uses an ephemeral source port, so it cannot be matched
+    /// against the advertised listener's full socket address. LAN peers are
+    /// matched by IP; the authenticated control handshake still decides which
+    /// identity owns the path.
+    pending_inbound: Arc<Mutex<HashMap<IpAddr, Vec<Connection>>>>,
     handle: Arc<Mutex<Option<EngineHandle>>>,
 }
 
@@ -75,13 +80,19 @@ impl QuicTransport {
             .parse()
             .map_err(|error| PlatformError::Adapter(format!("invalid LAN endpoint: {error}")))?;
         let quic = self.ensure_endpoint()?;
+        // Quinn spawns the connection driver inside `Endpoint::connect` via
+        // `tokio::spawn`, which panics unless the calling thread is inside a
+        // runtime context. This runs on the engine thread, so the guard must
+        // stay alive for the whole synchronous call — the guard from
+        // `ensure_endpoint` has already been dropped by the time we get here.
+        let _guard = self.runtime.enter();
         let connecting = quic
             .connect(remote, "anvil.local")
             .map_err(|error| PlatformError::Adapter(format!("QUIC connect: {error}")))?;
         let outgoing = self.outgoing.clone();
         let pending = self.pending_inbound.clone();
         let handle = self.handle.clone();
-        self.runtime.spawn(async move {
+        spawn_reported_on(&self.runtime, "connect", async move {
             match connecting.await {
                 Ok(connection) => {
                     if let Ok(mut connections) = outgoing.lock() {
@@ -101,7 +112,7 @@ impl QuicTransport {
                     let accepted = pending
                         .lock()
                         .ok()
-                        .and_then(|mut pending| pending.remove(&remote))
+                        .and_then(|mut pending| pending.remove(&remote.ip()))
                         .unwrap_or_default();
                     for connection in accepted {
                         spawn_readers(handle.clone(), path, connection);
@@ -141,7 +152,7 @@ impl QuicTransport {
         }
         let connection = self.connection(path)?;
         let bytes = data.to_vec();
-        self.runtime.spawn(async move {
+        spawn_reported_on(&self.runtime, "send-reliable", async move {
             if let Ok(mut stream) = connection.open_uni().await {
                 let _ = stream.write_all(&bytes).await;
                 let _ = stream.finish();
@@ -213,20 +224,20 @@ impl QuicTransport {
         let outgoing = self.outgoing.clone();
         let pending = self.pending_inbound.clone();
         let handle = self.handle.clone();
-        self.runtime.spawn(async move {
+        spawn_reported_on(&self.runtime, "accept", async move {
             while let Some(incoming) = accept_endpoint.accept().await {
                 let Ok(connection) = incoming.await else { continue };
                 let remote = connection.remote_address();
                 let path = outgoing.lock().ok().and_then(|connections| {
                     connections
                         .iter()
-                        .find(|(_, (address, _))| *address == remote)
+                        .find(|(_, (address, _))| address.ip() == remote.ip())
                         .map(|(path, _)| *path)
                 });
                 if let Some(path) = path {
                     spawn_readers(handle.clone(), path, connection);
                 } else if let Ok(mut pending) = pending.lock() {
-                    pending.entry(remote).or_default().push(connection);
+                    pending.entry(remote.ip()).or_default().push(connection);
                 }
             }
         });
@@ -242,18 +253,48 @@ impl QuicTransport {
 fn spawn_readers(handle: Arc<Mutex<Option<EngineHandle>>>, path: PathId, connection: Connection) {
     let datagram_connection = connection.clone();
     let datagram_handle = handle.clone();
-    tokio::spawn(async move {
+    spawn_reported("read-datagram", async move {
         while let Ok(data) = datagram_connection.read_datagram().await {
             emit(&datagram_handle, PlatformEvent::DatagramReceived { path, data: data.to_vec() });
         }
     });
 
-    tokio::spawn(async move {
+    spawn_reported("read-reliable", async move {
         while let Ok(mut stream) = connection.accept_uni().await {
             match stream.read_to_end(MAX_CONTROL_RECORD).await {
                 Ok(data) => emit(&handle, PlatformEvent::ReliableReceived { path, data }),
                 Err(_) => break,
             }
+        }
+    });
+}
+
+/// Spawn a task whose panic is reported instead of being silently dropped
+/// with the discarded `JoinHandle`.
+///
+/// This function must be called from within a tokio runtime context (it is,
+/// for every call site today — the connect/accept tasks and `spawn_readers`
+/// all run inside the `anvil-quic` runtime).
+fn spawn_reported(name: &'static str, task: impl Future<Output = ()> + Send + 'static) {
+    let handle = tokio::spawn(task);
+    tokio::spawn(async move {
+        if let Err(error) = handle.await {
+            eprintln!("[anvil] task `{name}` panicked: {error}");
+        }
+    });
+}
+
+/// [`spawn_reported`] for callers on a thread that is *outside* the runtime,
+/// where `tokio::spawn` would itself panic (e.g. the engine thread).
+fn spawn_reported_on(
+    runtime: &tokio::runtime::Runtime,
+    name: &'static str,
+    task: impl Future<Output = ()> + Send + 'static,
+) {
+    let handle = runtime.spawn(task);
+    runtime.spawn(async move {
+        if let Err(error) = handle.await {
+            eprintln!("[anvil] task `{name}` panicked: {error}");
         }
     });
 }
