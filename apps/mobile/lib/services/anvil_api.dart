@@ -41,6 +41,8 @@ class AnvilApi {
   final _events = StreamController<AnvilEvent>.broadcast();
   Isolate? _pump;
   ReceivePort? _pumpPort;
+  SendPort? _pumpControl;
+  Completer<void>? _pumpStopped;
   bool _disposed = false;
 
   static const _platformChannel = MethodChannel('dev.anvil/platform');
@@ -201,8 +203,18 @@ class AnvilApi {
   Future<void> _startPump() async {
     final port = ReceivePort();
     _pumpPort = port;
+    final stopped = Completer<void>();
+    _pumpStopped = stopped;
 
     port.listen((message) {
+      if (message is SendPort) {
+        _pumpControl = message;
+        return;
+      }
+      if (message == _pumpExited) {
+        if (!stopped.isCompleted) stopped.complete();
+        return;
+      }
       if (message is! String) return;
       try {
         final json = jsonDecode(message) as Map<String, dynamic>;
@@ -218,14 +230,31 @@ class AnvilApi {
       _PumpArgs(port.sendPort, _session.address),
       debugName: 'anvil-event-pump',
     );
+
+    // The pump sends its control port before entering the blocking FFI call.
+    // Waiting here makes dispose deterministic even on a freshly-started node.
+    try {
+      final deadline = DateTime.now().add(const Duration(seconds: 1));
+      while (_pumpControl == null && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      if (_pumpControl == null) {
+        throw TimeoutException('event pump did not become ready');
+      }
+    } on TimeoutException {
+      _pump?.kill(priority: Isolate.immediate);
+    }
   }
 
   /// Runs on a background isolate: block on the native queue, forward JSON.
   static void _pumpEntry(_PumpArgs args) {
     final bindings = AnvilBindings.load();
     final session = Pointer<AnvilSession>.fromAddress(args.sessionAddress);
+    var stop = false;
+    final control = RawReceivePort()..handler = (_) => stop = true;
+    args.sendPort.send(control.sendPort);
 
-    while (true) {
+    while (!stop) {
       final pointer = bindings.nextEvent(session, 250);
       if (pointer == nullptr) {
         continue; // timeout: loop so shutdown is noticed promptly
@@ -237,6 +266,8 @@ class AnvilApi {
         bindings.freeString(pointer);
       }
     }
+    control.close();
+    args.sendPort.send(_pumpExited);
   }
 
   /// Stop the node and release everything.
@@ -244,10 +275,18 @@ class AnvilApi {
     if (_disposed) return;
     _disposed = true;
 
-    // Kill the pump before shutting the session down, so it cannot call into a
-    // freed handle.
-    _pump?.kill(priority: Isolate.immediate);
+    // Ask the pump to leave its bounded native wait and only force-kill it if
+    // the native side does not return. Calling shutdown while nextEvent is
+    // still in flight races a freed session pointer and can crash the app.
+    _pumpControl?.send(null);
+    try {
+      await _pumpStopped?.future.timeout(const Duration(seconds: 1));
+    } on TimeoutException {
+      _pump?.kill(priority: Isolate.immediate);
+    }
     _pump = null;
+    _pumpControl = null;
+    _pumpStopped = null;
     _pumpPort?.close();
     _pumpPort = null;
 
@@ -270,3 +309,5 @@ class _PumpArgs {
   final SendPort sendPort;
   final int sessionAddress;
 }
+
+const _pumpExited = '__anvil_pump_exited__';
