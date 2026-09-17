@@ -16,4 +16,5 @@ fi
   build \
   --manifest-path "${REPOSITORY_ROOT}/Cargo.toml" \
   --package anvil-ffi \
+  --features opus \
   --release

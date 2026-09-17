@@ -352,6 +352,8 @@
 			);
 			name = "Build Anvil Rust Core";
 			outputPaths = (
+				"$(PROJECT_DIR)/../../../target/aarch64-apple-ios/debug/libanvil_ffi.a",
+				"$(PROJECT_DIR)/../../../target/aarch64-apple-ios/release/libanvil_ffi.a",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;

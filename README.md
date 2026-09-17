@@ -1,149 +1,226 @@
 # Anvil
 
-Anvil is an offline-first, end-to-end encrypted group voice project for nearby
-devices. The target is to work without internet access, cellular service,
-accounts, or servers—first over an ordinary local Wi-Fi network, and eventually
-over Wi-Fi Aware when there is no router.
+What if a group voice room did not begin with a login screen?
 
-> [!IMPORTANT]
-> **Current status: architecture prototype, not a working voice app.** The
-> Phase 0 foundation is substantially in place: protocol documentation, the
-> Rust engine and state machines, a C ABI, the Flutter UX, native app shells,
-> and platform-adapter/build scaffolding. Real discovery, connections, audio,
-> persistent identity, and encryption are not connected end to end yet. The
-> next milestone is the Phase 1 LAN proof of concept.
+What if four phones could find one another, form a room, and keep talking after
+the router lost its internet connection? What if the room had no server to
+trust, no account database to query, and no central relay that could read the
+conversation?
 
-## What exists today
+Anvil is an experiment in that direction: an offline-first, end-to-end
+encrypted communication system for nearby devices. It combines a Flutter
+mobile interface with a Rust engine that owns identity, rooms, transport,
+encryption, routing, chat, and voice media. Android and iOS provide the radio,
+audio, lifecycle, and secure-storage capabilities around it.
 
-| Area | Current state |
-|---|---|
-| Protocol and architecture | Specifications cover identity, discovery, packet formats, encryption, room lifecycle, relay election, transport selection, and failure recovery. |
-| Rust core | Deterministic engine loop plus tested room, call, chat, discovery, routing, relay, packet, jitter-buffer, mixer, VAD, replay-window, and path-failover logic. |
-| Host boundary | A working C ABI accepts JSON commands and exposes a bounded event queue; Dart bindings consume it on a background isolate. |
-| Flutter app | First-run, home, peer, direct-call, chat, room, trust-warning, and diagnostics surfaces are implemented and fold core events through one controller. |
-| Native projects | Android and iOS projects include permissions, lifecycle, key-store, LAN, Wi-Fi Aware, and audio adapter seams. Android Gradle and the iOS Xcode project invoke Rust build scripts. |
-| Verification | `cargo test --workspace` passes 295 tests; the Flutter suite passes 21 tests; Rust clippy and Flutter analysis are clean. |
+The interesting constraint is also the product idea: Anvil should remain useful
+when the usual infrastructure disappears.
 
-The implemented core logic is intentionally device-independent. It can model
-peer discovery, path loss, relay failure, room membership, and media timing with
-an injected clock and fake platform, which is why those behaviours are testable
-before the radio and audio adapters are live.
+## The short version
 
-## What does not work yet
+Anvil is designed for:
 
-- The FFI session currently starts the Rust engine with `NullPlatform`; the
-  Kotlin and Swift adapters are not attached to that engine.
-- The platform-event entry points are incomplete, including the Android JNI
-  implementation and the Rust symbol called by Swift.
-- Android NSD, iOS Bonjour/`NWBrowser`, QUIC connections, and reliable control
-  messages are not implemented. Joining a room, admitting a participant,
-  calling a peer, and sending a message therefore do not reach another device.
-- Opus encode/decode and microphone/speaker I/O are stubs.
-- Ed25519 identity generation, signing, authenticated handshakes, sender-key
-  derivation, ChaCha20-Poly1305 media protection, and persistent identity loading
-  are stubs. The current profile uses a placeholder identity and is not restored
-  across launches.
-- Relay selection, forwarding, replay rejection, and adaptive path choice are
-  implemented as core logic, but are not driven by real network traffic.
-- Android Wi-Fi Aware is scaffolded only. Cross-platform Wi-Fi Aware support is
-  still an open hardware/API question on iOS.
+- small voice rooms between nearby phones;
+- no accounts, servers, phone numbers, or internet requirement;
+- local discovery over Wi-Fi, with Android Wi-Fi Aware for routerless paths;
+- end-to-end encrypted media, including when traffic crosses a relay;
+- transport failover when a path becomes slow, unreachable, or disappears;
+- a single platform-independent protocol core, so Android and iOS do not make
+  different decisions about rooms or security.
 
-In particular, the current build must not be treated as secure: the product's
-end-to-end encryption design is documented and its bookkeeping is tested, but
-the cryptographic operations are not yet in the runtime path.
+The current codebase is beyond a UI mockup. The Rust engine, C ABI, Flutter
+client, Android/iOS bridges, QUIC LAN transport, Opus voice path, encryption
+bookkeeping, and Android Wi-Fi Aware adapter are implemented and covered by
+automated tests. The remaining uncertainty is primarily empirical: real-device
+radio behavior, cross-platform discovery, background execution, and audio
+tuning still need testing on physical phones.
 
-## No-accounts model
+## Follow the conversation
 
-The intended identity model has no signup, login, password, phone number, or
-server. On first launch, a user chooses a display name and Anvil generates a
-long-lived keypair locally:
+Anvil can be understood as a chain of questions.
+
+### How do nearby devices find each other?
+
+Each device publishes a small advertisement containing a short identity
+fingerprint and, when relevant, a room hint. The advertisement is deliberately
+not proof of identity. It is only an invitation to begin a conversation.
+
+On a local Wi-Fi network, Anvil uses Bonjour/NSD discovery. On Android devices
+with supported hardware and permissions, the Wi-Fi Aware adapter publishes and
+subscribes to the same service name without requiring a router. A device may be
+seen through both paths; the Rust core folds those sightings back into one peer
+while keeping both paths available.
+
+See [`protocol/discovery.md`](protocol/discovery.md) for the details and the
+limits of discovery data.
+
+### How can there be identity without accounts?
+
+The device is the account.
+
+On first launch, Anvil creates a local keypair and derives a `PeerId` from its
+public key. A display name is just a label. Two people can both be called
+“Femi”; their cryptographic identities remain different.
+
+Trust is explicit and local. A peer encountered for the first time is shown as
+unverified. If a known peer later presents a different key, Anvil raises a
+warning instead of quietly replacing the identity.
 
 ```text
-Install  ->  choose a display name  ->  generate and store a keypair  ->  ready
-Reopen   ->  load local identity    ->  start discovery               ->  ready
+first launch  →  create local identity  →  advertise fingerprint
+meeting       →  authenticate identity  →  remember trust decision
+reopening     →  load local identity    →  discover nearby peers
 ```
 
-| Conventional system | Anvil design |
-|---|---|
-| account | an on-device keypair |
-| user ID | `PeerId`, derived from the public key |
-| login | loading the local profile |
-| session token | none |
-| display name | a label, deliberately not an identity |
+The identity model and its trade-offs live in
+[`protocol/identity.md`](protocol/identity.md).
 
-Two people may both be called “Femi.” Anvil distinguishes them by `PeerId` and
-shows a short fingerprint when it matters. Trust is trust-on-first-use: a known
-peer presenting a different key raises an explicit warning rather than being
-silently accepted. See [`protocol/identity.md`](protocol/identity.md) for the
-model and its limits.
+### What is a room, if connections can vanish?
 
-The UI and state machine for this flow exist today; secure key generation and
-persistence are Phase 2 work.
+A room is not a socket.
+
+`RoomId`, membership, key epochs, message history, and call state live above
+the network paths. A Wi-Fi connection can fail while the room remains intact;
+the transport manager can promote another path or wait for reconnection.
+
+For groups larger than two, Anvil can elect one participant as a relay. The
+relay forwards already-sealed media packets. It does not become the authority,
+and it does not receive the sender keys needed to decrypt everybody’s voice.
+If that relay disappears, the remaining members can elect another one without
+changing the room’s trust model.
+
+These are not just diagrams. The room, relay, routing, replay, failover, and
+media-timing behaviors are exercised with deterministic clocks and fake
+transports in the Rust test suite.
+
+### How does voice survive a bad packet?
+
+Voice is treated as a stream of moments, not a queue of obligations.
+
+The audio path is:
+
+```text
+microphone
+   ↓
+native PCM handoff
+   ↓
+Rust resampling + VAD
+   ↓
+Opus encode
+   ↓
+end-to-end media encryption
+   ↓
+QUIC datagram / Wi-Fi Aware message
+   ↓
+replay check + decrypt
+   ↓
+jitter buffer + Opus PLC decode
+   ↓
+Rust mixer
+   ↓
+speaker
+```
+
+Lost voice frames are allowed to disappear. Late audio is usually worse than
+missing audio, so media uses unreliable datagrams while room control uses a
+reliable ordered channel. The mixer, jitter buffer, resampler, VAD, and Opus
+engine are shared across platforms rather than reimplemented in Dart.
+
+### What happens when the network is not normal?
+
+Anvil assumes that the network will be awkward:
+
+- a router may provide Wi-Fi but no internet;
+- Android may prefer cellular unless sockets are scoped correctly;
+- guest networks may isolate clients from one another;
+- a peer may move between Wi-Fi paths;
+- a phone call may interrupt the microphone;
+- a relay may run low on battery or disappear;
+- packets may be duplicated, reordered, delayed, or forged.
+
+The core responds to observations rather than making the platform adapters
+decide policy. Kotlin and Swift report capabilities and events; Rust decides
+which path to use, when to fail over, whether a packet is authentic, and how
+the room should change.
 
 ## Architecture
 
 ```text
-Flutter          screens, controls, state display
-    |  commands in, events out; never protocol state
-Rust core        identity, rooms, crypto, media, transport, relay
-    |  capabilities in, platform commands out
-Kotlin / Swift   Wi-Fi Aware, LAN, microphone, lifecycle, secure storage
-    |
-Wi-Fi LAN  /  Wi-Fi Aware
+┌─────────────────────────────────────────────────────────────┐
+│ Flutter                                                      │
+│ screens, controls, accessible state, event presentation      │
+└──────────────────────┬──────────────────────────────────────┘
+                       │ JSON commands/events over C ABI
+┌──────────────────────▼──────────────────────────────────────┐
+│ Rust / anvil-core                                            │
+│ identity · rooms · crypto · chat · calls · Opus · routing    │
+│ relay election · path scoring · failover · replay protection  │
+└──────────────────────┬──────────────────────────────────────┘
+                       │ narrow platform capability boundary
+┌──────────────────────▼──────────────────────────────────────┐
+│ Kotlin / Swift                                               │
+│ discovery · Wi-Fi Aware · audio · lifecycle · key storage     │
+└──────────────────────┬──────────────────────────────────────┘
+                       │
+             Wi-Fi LAN · AWDL peer-to-peer · Android Aware
 ```
 
-Three invariants shape the design:
+The boundary is intentionally asymmetric: the platform performs, while the
+core decides. This keeps protocol behavior testable on a laptop and prevents
+Android and iOS from slowly growing two incompatible versions of Anvil.
 
-**A room is not a connection.** `RoomId`, `PeerId`, `StreamId`, sequence state,
-and key epochs are independent of sockets, IP addresses, and radios. Replacing
-a failed path should not replace the room.
+## Where the project stands
 
-**A relay is not an authority.** Group media is designed to pass through an
-elected participant that forwards sealed packets without holding other senders'
-media keys. Replacing the relay should not change the room's trust model.
+The most useful distinction is between “implemented in the engine” and
+“proven on real radios.”
 
-**The core decides; the platform performs.** Transport selection, failover,
-relay election, identity, and media timing live in Rust. Kotlin and Swift expose
-OS capabilities and carry out requests without duplicating protocol policy.
+| Area | Current state |
+| --- | --- |
+| Rust protocol engine | Room lifecycle, identities, calls, chat, routing, relay logic, path scoring, failover, replay handling, and media timing are implemented. |
+| Cryptography | Ed25519/X25519 identity, authenticated handshakes, sender-key epochs, ChaCha20-Poly1305 media, and replay windows are in the Rust runtime path. |
+| Voice | Native PCM enters Rust; Opus encoding/decoding, jitter buffering, PLC, mixing, encryption, and playback are wired through the mobile builds. |
+| LAN transport | Mobile builds use the Rust QUIC data plane for LAN paths, with native discovery and Wi-Fi-scoped platform configuration. |
+| Android Wi-Fi Aware | Real publish/subscribe discovery and session-local framed transport are implemented. Reliable control records are fragmented, reassembled, acknowledged, and retried. |
+| iOS peer-to-peer | iOS has no public Android-style Wi-Fi Aware/NAN API. Its Network.framework LAN path opts into peer-to-peer/AWDL where available; it does not claim a fake Aware capability. |
+| Flutter shell | First-run identity, discovery, peer trust, calls, rooms, chat, diagnostics, and lifecycle presentation are connected to the core event stream. |
+| Device validation | Builds and deterministic tests pass. Physical-device matrix testing remains the next proof point. |
 
-## Repository layout
+The iOS Opus build has a small extra piece of toolchain glue because the
+upstream bundled Opus build uses Autoconf: the repository’s
+[`opus_cc_wrapper.sh`](apps/mobile/ios/opus_cc_wrapper.sh) applies iPhoneOS
+flags only inside the temporary Opus build and leaves Cargo’s host tools on the
+macOS SDK.
+
+## Repository map
 
 ```text
-crates/anvil-core/     protocol engine and platform-independent policy
-  identity/            profiles, fingerprints, known peers, TOFU bookkeeping
-  peer/                peer relationships and direct-call state machine
-  chat/                messages and in-memory history
-  room/                membership, join codes, epochs, and room state
-  transport/           path metrics, scoring, and failover
-  relay/               election, health monitoring, and forwarding rules
-  audio/               PCM frames, jitter buffer, VAD, mixer, Opus seam
-  crypto/              identity, handshake, replay, epoch, and sender-key seams
-crates/anvil-ffi/      C ABI and JSON command/event conversion
-apps/mobile/lib/       Flutter application, controller, models, and FFI client
-apps/mobile/android/   Kotlin platform adapters and Rust build hook
-apps/mobile/ios/       Swift platform adapters and Rust build hook
-protocol/              protocol and architecture documents
-tests/                 real-device test plans for later milestones
+crates/anvil-core/     platform-independent protocol engine
+  identity/            local identity, fingerprints, trust-on-first-use
+  room/                membership, join codes, epochs, room state
+  transport/           paths, metrics, scoring, failover
+  relay/               election, health, forwarding
+  audio/               PCM, VAD, resampling, jitter, mixer, Opus
+  crypto/              identity, handshake, keys, AEAD, replay windows
+
+crates/anvil-ffi/      C ABI, JSON conversion, native platform bridge, QUIC
+apps/mobile/lib/       Flutter UI, controller, models, FFI client
+apps/mobile/android/   Android adapters, Wi-Fi Aware, Rust/JNI build hook
+apps/mobile/ios/       iOS adapters, peer-to-peer LAN, Rust/Xcode build hook
+protocol/              design notes and wire-format documents
+tests/                 physical-device scenarios and validation plans
 ```
 
-## Development
-
-### Prerequisites
-
-- Rust stable, with `rustfmt` and `clippy` (the crates require Rust 1.82 or
-  newer)
-- Flutter 3.22 or newer with Dart 3.4 or newer for the mobile shell
-
-### Checks that work now
+## Try the checks
 
 From the repository root:
 
 ```bash
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo fmt --all -- --check
 ```
 
-For Flutter:
+For the Flutter shell:
 
 ```bash
 cd apps/mobile
@@ -152,73 +229,42 @@ flutter test
 flutter analyze
 ```
 
-The Flutter unit tests do not load the Rust dynamic library; they exercise event
-decoding and UI-facing model behaviour. Running on a phone additionally enters
-the unfinished native integration described above.
+Build the mobile packages when the relevant SDKs are installed:
 
-### Native build scaffolding
+```bash
+flutter build apk --debug
+flutter build ios --no-codesign
+```
 
-- Android's `preBuild` task calls `apps/mobile/android/build_rust.sh`, which
-  expects `cargo-ndk` and currently builds only `arm64-v8a` into `jniLibs`.
-- The iOS Xcode project calls `apps/mobile/ios/build_rust.sh`, which currently
-  builds `aarch64-apple-ios` for a physical device. Simulator targets and final
-  static-library linkage still need to be completed.
+Android’s native build uses `cargo-ndk` and currently targets `arm64-v8a`.
+iOS’s native build targets a physical `aarch64-apple-ios` device. The iOS
+command above intentionally skips signing; deployable builds still need an
+Apple team and provisioning profile.
 
-The Cargo features below are off by default. Enabling one currently makes its
-dependencies available; it does **not** imply the subsystem is complete.
+## Read further
 
-| Feature | Dependency surface | Implementation state |
-|---|---|---|
-| `crypto` | Ed25519, X25519, HKDF, SHA-256, ChaCha20-Poly1305 | SHA-256 peer-ID derivation exists; key lifecycle, signatures, handshake, and AEAD are pending. |
-| `quic` | quinn and rustls | Constants and interface seam only. |
-| `opus` | libopus through `audiopus` | Interface seam only; encode/decode return `NotImplemented`. |
+Start with [`protocol/specification.md`](protocol/specification.md) for the
+design map, then explore the parts that raise the most interesting questions:
 
-## Implementation roadmap
+1. [`protocol/discovery.md`](protocol/discovery.md) — finding peers without a
+   registry.
+2. [`protocol/identity.md`](protocol/identity.md) — names, keys, and trust.
+3. [`protocol/transport.md`](protocol/transport.md) — choosing and replacing
+   paths.
+4. [`protocol/encryption.md`](protocol/encryption.md) — transport security,
+   end-to-end media, epochs, and replay rejection.
+5. [`protocol/relay-election.md`](protocol/relay-election.md) — why a relay is
+   useful but never an authority.
+6. [`tests/README.md`](tests/README.md) — the real-device experiments still to
+   run.
 
-The phases describe operational milestones. Some later-phase algorithms were
-implemented early as pure logic, but they are not considered complete until
-they run between real devices.
+## The experiment
 
-| Phase | Goal | Current state |
-|---|---|---|
-| 0 | Repository, interfaces, protocol docs, app shell | **Substantially complete**; native bridge attachment/linkage remains. |
-| 1 | LAN discovery, QUIC, Opus, and real audio | **Next**; interfaces and build hooks only. |
-| 2 | Persistent identity, authenticated handshake, sender keys, and epochs | Bookkeeping and tests exist; cryptographic operations are pending. |
-| 3 | Encrypted relay fan-out and relay failover | Election, health, routing, and forwarding logic exist; network coordination is pending. |
-| 4 | Android Wi-Fi Aware | Adapter scaffold only. |
-| 5 | iOS peer-to-peer path and cross-platform interop | Unvalidated; highest schedule risk. |
-| 6 | Simultaneous paths and adaptive failover | Scoring/failover logic exists; live multi-path integration is pending. |
-| 7 | Audio measurement and tuning | VAD, jitter, and mixing logic exist; codec/device tuning is pending. |
-| 8 | Reliability, security, and stress validation | Device test plans exist; execution depends on the earlier phases. |
+The long-term test is deliberately simple to describe:
 
-The success criterion remains: **three or four phones, no internet, and a secure
-group conversation**, both on a router with its WAN disconnected and on a
-routerless local path.
+> Put three or four phones in the same place. Disconnect the internet. Start a
+> room. Talk. Unplug the router, move between paths, let one phone leave, and
+> see whether the conversation remains understandable and the trust model
+> remains intact.
 
-## Known risks
-
-**iOS peer-to-peer interop is the largest schedule risk.** Whether the available
-Apple APIs can establish the required path with Android Wi-Fi Aware is an
-empirical question. It should be tested with a small two-device probe before
-the later phases depend on it. The protocol can fall back to a local network
-hosted by one device without changing room identity or encryption.
-
-**Sender keys are deliberately sized for small rooms.** The v0.1 design requires
-O(n²) key deliveries on membership changes. That is acceptable for three or
-four participants, not for larger rooms. `GroupKeyManager` is the replacement
-seam for a future MLS-based design.
-
-## Reading order
-
-1. [`protocol/specification.md`](protocol/specification.md) — invariants and the
-   full document map.
-2. [`crates/anvil-core/src/lib.rs`](crates/anvil-core/src/lib.rs) — the core's
-   ownership and platform-boundary model.
-3. [`crates/anvil-core/src/engine.rs`](crates/anvil-core/src/engine.rs) — what is
-   handled now and where operational stubs remain.
-4. [`protocol/transport.md`](protocol/transport.md) — path scoring and failover.
-5. [`protocol/encryption.md`](protocol/encryption.md) and
-   [`protocol/identity.md`](protocol/identity.md) — the security design and its
-   explicit trade-offs.
-6. [`tests/README.md`](tests/README.md) — device scenarios that become runnable
-   as the platform milestones land.
+Anvil is an attempt to make that experiment ordinary.
