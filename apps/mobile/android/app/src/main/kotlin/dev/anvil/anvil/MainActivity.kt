@@ -23,8 +23,11 @@ class MainActivity : FlutterActivity() {
                         if (session == null || session == 0L) {
                             result.error("invalid_session", "Missing native session pointer", null)
                         } else {
-                            platform.attach(session)
-                            result.success(null)
+                            if (platform.attach(session)) {
+                                result.success(null)
+                            } else {
+                                result.error("attach_failed", "Native platform attachment failed", null)
+                            }
                         }
                     }
                     "detach" -> {
@@ -43,6 +46,16 @@ class MainActivity : FlutterActivity() {
         anvilPlatform?.detach()
         anvilPlatform = null
         super.cleanUpFlutterEngine(flutterEngine)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        anvilPlatform?.onForeground()
+    }
+
+    override fun onStop() {
+        anvilPlatform?.onBackground()
+        super.onStop()
     }
 
     override fun onRequestPermissionsResult(

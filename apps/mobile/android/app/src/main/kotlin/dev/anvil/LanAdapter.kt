@@ -130,7 +130,8 @@ class LanAdapter(
         } catch (error: RuntimeException) {
             discoveryListener = null
             releaseMulticastLock()
-            throw error
+            Log.w(TAG, "NSD discovery unavailable", error)
+            emit(PlatformEvent.NetworkChanged("lan", false))
         }
     }
 
@@ -150,8 +151,9 @@ class LanAdapter(
     }
 
     fun advertise(payload: ByteArray) {
-        require(payload.size <= MAX_TXT_VALUE_BYTES) {
-            "Anvil advertisement is ${payload.size} bytes; NSD TXT limit is $MAX_TXT_VALUE_BYTES"
+        if (payload.size > MAX_TXT_VALUE_BYTES) {
+            Log.w(TAG, "Anvil advertisement is ${payload.size} bytes; NSD limit is $MAX_TXT_VALUE_BYTES")
+            return
         }
         if (advertisedPayload?.contentEquals(payload) == true && registrationListener != null) return
         stopAdvertising()
@@ -180,7 +182,12 @@ class LanAdapter(
             }
         }
         registrationListener = listener
-        nsd.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
+        try {
+            nsd.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
+        } catch (error: RuntimeException) {
+            registrationListener = null
+            Log.w(TAG, "NSD advertising unavailable", error)
+        }
     }
 
     fun stopAdvertising() {

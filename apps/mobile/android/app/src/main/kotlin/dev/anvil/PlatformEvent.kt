@@ -57,6 +57,22 @@ sealed class PlatformEvent {
         }.toString()
     }
 
+    data class DatagramReceived(val pathId: Long, val data: ByteArray) : PlatformEvent() {
+        override fun toJson(): String = JSONObject().apply {
+            put("type", "datagramReceived")
+            put("pathId", pathId)
+            put("data", JSONArray(data.map { it.toInt() and 0xFF }))
+        }.toString()
+    }
+
+    data class ReliableReceived(val pathId: Long, val data: ByteArray) : PlatformEvent() {
+        override fun toJson(): String = JSONObject().apply {
+            put("type", "reliableReceived")
+            put("pathId", pathId)
+            put("data", JSONArray(data.map { it.toInt() and 0xFF }))
+        }.toString()
+    }
+
     data class AudioCaptured(
         val samples: ShortArray,
         val sampleRate: Int,
@@ -66,7 +82,7 @@ sealed class PlatformEvent {
         override fun toJson(): String = JSONObject().apply {
             put("type", "audioCaptured")
             put("samples", JSONArray(samples.map { it.toInt() }))
-            put("sampleRate", sampleRate)
+            put("sampleRateHz", sampleRate)
             put("channels", channels)
             put("timestamp", timestamp)
         }.toString()

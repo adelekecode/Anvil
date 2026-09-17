@@ -6,6 +6,7 @@ import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.os.Process
+import android.util.Log
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -65,17 +66,34 @@ class AudioAdapter(
             channelConfig,
             AudioFormat.ENCODING_PCM_16BIT,
         )
-        val audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-            sampleRateHz,
-            channelConfig,
-            AudioFormat.ENCODING_PCM_16BIT,
-            maxOf(minimum, frameSamples * 8),
-        )
-        check(audioRecord.state == AudioRecord.STATE_INITIALIZED) { "AudioRecord initialization failed" }
+        val audioRecord = try {
+            AudioRecord(
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                sampleRateHz,
+                channelConfig,
+                AudioFormat.ENCODING_PCM_16BIT,
+                maxOf(minimum, frameSamples * 8),
+            )
+        } catch (error: RuntimeException) {
+            Log.e(TAG, "AudioRecord creation failed", error)
+            return
+        }
+        if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
+            Log.e(TAG, "AudioRecord initialization failed")
+            audioRecord.release()
+            return
+        }
         record = audioRecord
         capturing.set(true)
-        audioRecord.startRecording()
+        try {
+            audioRecord.startRecording()
+        } catch (error: IllegalStateException) {
+            Log.e(TAG, "AudioRecord start failed", error)
+            capturing.set(false)
+            record = null
+            audioRecord.release()
+            return
+        }
         captureThread = Thread({
             Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
             var timestamp = 0L
@@ -83,7 +101,12 @@ class AudioAdapter(
             while (capturing.get()) {
                 var offset = 0
                 while (offset < samples.size && capturing.get()) {
-                    val read = audioRecord.read(samples, offset, samples.size - offset)
+                    val read = try {
+                        audioRecord.read(samples, offset, samples.size - offset)
+                    } catch (error: IllegalStateException) {
+                        Log.w(TAG, "AudioRecord read stopped", error)
+                        break
+                    }
                     if (read <= 0) break
                     offset += read
                 }
@@ -102,7 +125,14 @@ class AudioAdapter(
             it.release()
         }
         record = null
-        captureThread?.interrupt()
+        captureThread?.let { thread ->
+            thread.interrupt()
+            try {
+                thread.join(1_000)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        }
         captureThread = null
     }
 
@@ -115,25 +145,34 @@ class AudioAdapter(
             channelConfig,
             AudioFormat.ENCODING_PCM_16BIT,
         )
-        val audioTrack = AudioTrack.Builder()
-            .setAudioAttributes(
-                android.media.AudioAttributes.Builder()
-                    .setUsage(android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build(),
-            )
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setSampleRate(sampleRateHz)
-                    .setChannelMask(channelConfig)
-                    .build(),
-            )
-            .setBufferSizeInBytes(maxOf(minimum, sampleRateHz / 10 * channels * 2))
-            .setTransferMode(AudioTrack.MODE_STREAM)
-            .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
-            .build()
-        check(audioTrack.state == AudioTrack.STATE_INITIALIZED) { "AudioTrack initialization failed" }
+        val audioTrack = try {
+            AudioTrack.Builder()
+                .setAudioAttributes(
+                    android.media.AudioAttributes.Builder()
+                        .setUsage(android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build(),
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setSampleRate(sampleRateHz)
+                        .setChannelMask(channelConfig)
+                        .build(),
+                )
+                .setBufferSizeInBytes(maxOf(minimum, sampleRateHz / 10 * channels * 2))
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+                .build()
+        } catch (error: RuntimeException) {
+            Log.e(TAG, "AudioTrack creation failed", error)
+            return
+        }
+        if (audioTrack.state != AudioTrack.STATE_INITIALIZED) {
+            Log.e(TAG, "AudioTrack initialization failed")
+            audioTrack.release()
+            return
+        }
         track = audioTrack
         audioTrack.play()
     }
@@ -147,6 +186,14 @@ class AudioAdapter(
     }
 
     fun play(samples: ShortArray) {
-        track?.write(samples, 0, samples.size, AudioTrack.WRITE_NON_BLOCKING)
+        try {
+            track?.write(samples, 0, samples.size, AudioTrack.WRITE_NON_BLOCKING)
+        } catch (error: IllegalStateException) {
+            Log.w(TAG, "AudioTrack write stopped", error)
+        }
+    }
+
+    private companion object {
+        const val TAG = "AnvilAudio"
     }
 }

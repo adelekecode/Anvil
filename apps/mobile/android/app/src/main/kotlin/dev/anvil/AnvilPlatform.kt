@@ -38,31 +38,40 @@ import androidx.core.app.ActivityCompat
  */
 class AnvilPlatform(private val context: Context) {
 
+    private val sessionLock = Any()
+
     private val lan = LanAdapter(context) { event -> emit(event) }
     private val aware = WifiAwareAdapter(context) { event -> emit(event) }
     private val audio = AudioAdapter(context) { event -> emit(event) }
-    private val lifecycle = LifecycleAdapter { event -> emit(event) }
+    private val lifecycle = LifecycleAdapter(context) { event -> emit(event) }
 
     /** Native session pointer, set by the Flutter side after `anvil_init`. */
     @Volatile
     private var sessionPtr: Long = 0L
 
-    fun attach(sessionPtr: Long) {
+    fun attach(sessionPtr: Long): Boolean {
         val result = nativeAttach(sessionPtr)
-        check(result == 0) { "Rust rejected Android platform attachment: $result" }
-        this.sessionPtr = sessionPtr
+        if (result != 0) {
+            Log.e(TAG, "Rust rejected Android platform attachment: $result")
+            return false
+        }
+        synchronized(sessionLock) { this.sessionPtr = sessionPtr }
         lifecycle.start()
+        return true
     }
 
     fun detach() {
-        val ptr = sessionPtr
+        val ptr = synchronized(sessionLock) {
+            val current = sessionPtr
+            sessionPtr = 0L
+            current
+        }
         lifecycle.stop()
         lan.stopDiscovery()
         lan.stopAdvertising()
         aware.stopDiscovery()
         audio.stopCapture()
         audio.stopPlayback()
-        sessionPtr = 0L
         if (ptr != 0L) nativeDetach(ptr)
     }
 
@@ -130,6 +139,9 @@ class AnvilPlatform(private val context: Context) {
 
     fun play(samples: ShortArray) = audio.play(samples)
 
+    fun onForeground() = lifecycle.foreground()
+    fun onBackground() = lifecycle.background()
+
     fun close(pathId: Long) {
         lan.close(pathId)
         aware.close(pathId)
@@ -146,7 +158,10 @@ class AnvilPlatform(private val context: Context) {
     fun listen(kind: String): String = when (kind) {
         "lan" -> lan.listen()
         "wifi-aware" -> aware.listen()
-        else -> error("unknown path kind $kind")
+        else -> {
+            Log.w(TAG, "unknown path kind $kind")
+            ""
+        }
     }
 
     fun loadIdentity(): ByteArray? = KeyStore.loadIdentity(context)
@@ -206,10 +221,21 @@ class AnvilPlatform(private val context: Context) {
     // --- events to the core -------------------------------------------------
 
     private fun emit(event: PlatformEvent) {
-        val ptr = sessionPtr
-        if (ptr == 0L) return
-        val result = nativeSubmitEvent(ptr, event.toJson())
-        if (result != 0) Log.w(TAG, "platform event rejected by core: $result")
+        synchronized(sessionLock) {
+            val ptr = sessionPtr
+            if (ptr == 0L) return
+            val result = when (event) {
+                is PlatformEvent.AudioCaptured -> nativeSubmitAudio(
+                    ptr,
+                    event.samples,
+                    event.sampleRate,
+                    event.channels,
+                    event.timestamp,
+                )
+                else -> nativeSubmitEvent(ptr, event.toJson())
+            }
+            if (result != 0) Log.w(TAG, "platform event rejected by core: $result")
+        }
     }
 
     /**
@@ -220,6 +246,13 @@ class AnvilPlatform(private val context: Context) {
      * events and host commands are serialised in one place.
      */
     private external fun nativeSubmitEvent(sessionPtr: Long, json: String): Int
+    private external fun nativeSubmitAudio(
+        sessionPtr: Long,
+        samples: ShortArray,
+        sampleRateHz: Int,
+        channels: Int,
+        timestamp: Long,
+    ): Int
     private external fun nativeAttach(sessionPtr: Long): Int
     private external fun nativeDetach(sessionPtr: Long)
 

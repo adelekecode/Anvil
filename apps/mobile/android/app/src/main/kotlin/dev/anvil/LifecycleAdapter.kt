@@ -1,5 +1,11 @@
 package dev.anvil
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
+
 /**
  * App lifecycle and device status.
  *
@@ -13,15 +19,56 @@ package dev.anvil
  *
  * PHASE1.
  */
-class LifecycleAdapter(private val emit: (PlatformEvent) -> Unit) {
+class LifecycleAdapter(
+    private val context: Context,
+    private val emit: (PlatformEvent) -> Unit,
+) {
+
+    private var foreground = false
+    private var batteryReceiver: BroadcastReceiver? = null
 
     fun start() {
-        // PHASE1: register a ProcessLifecycleOwner observer for foreground and
-        // background, plus a BroadcastReceiver for ACTION_BATTERY_CHANGED and
-        // thermal status via PowerManager.addThermalStatusListener.
+        if (batteryReceiver == null) {
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(context: Context, intent: Intent) {
+                    emitStatus(intent)
+                }
+            }
+            batteryReceiver = receiver
+            context.registerReceiver(receiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        }
+        foreground()
     }
 
     fun stop() {
-        // PHASE1: unregister everything.
+        batteryReceiver?.let { receiver ->
+            context.unregisterReceiver(receiver)
+            batteryReceiver = null
+        }
+        background()
+    }
+
+    fun foreground() {
+        if (!foreground) {
+            foreground = true
+            emit(PlatformEvent.LifecycleChanged(true))
+        }
+    }
+
+    fun background() {
+        if (foreground) {
+            foreground = false
+            emit(PlatformEvent.LifecycleChanged(false))
+        }
+    }
+
+    private fun emitStatus(intent: Intent) {
+        val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+        val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+        val percentage = if (level >= 0 && scale > 0) (level * 100 / scale).coerceIn(0, 100) else null
+        val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+        val charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+            status == BatteryManager.BATTERY_STATUS_FULL
+        emit(PlatformEvent.DeviceStatus(percentage, charging, false))
     }
 }
