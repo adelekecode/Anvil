@@ -37,6 +37,8 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 
 use crate::audio::{JitterBuffer, Mixer, VoiceActivityDetector};
+#[cfg(feature = "opus")]
+use crate::audio::{OpusConfig, OpusVoiceDecoder, OpusVoiceEncoder, Playout};
 use crate::chat::{Conversation, DeliveryState, History, Message};
 use crate::crypto::DeviceIdentity;
 #[cfg(feature = "crypto")]
@@ -48,6 +50,8 @@ use crate::peer::{CallEnded, CallState};
 use crate::platform::{NullPlatform, PlatformAdapter, PlatformEvent};
 use crate::relay::RelayMonitor;
 use crate::room::{JoinCode, RoomIdentity, RoomState};
+#[cfg(all(feature = "crypto", feature = "opus"))]
+use crate::routing::{resolve_forward, resolve_media, Topology};
 use crate::time::{Clock, Monotonic, SystemClock};
 use crate::transport::TransportManager;
 use crate::{AnvilConfig, AppState, Event, EventSink, PeerId, RoomId};
@@ -268,6 +272,10 @@ pub struct Engine {
     #[allow(dead_code)]
     mixer: Mixer,
     jitter: std::collections::HashMap<PeerId, JitterBuffer>,
+    #[cfg(feature = "opus")]
+    encoder: Option<OpusVoiceEncoder>,
+    #[cfg(feature = "opus")]
+    decoders: std::collections::HashMap<PeerId, OpusVoiceDecoder>,
 
     counters: Counters,
     muted: bool,
@@ -332,6 +340,10 @@ impl Engine {
             pending_join_requests: std::collections::HashMap::new(),
             relay_monitor: None,
             jitter: std::collections::HashMap::new(),
+            #[cfg(feature = "opus")]
+            encoder: None,
+            #[cfg(feature = "opus")]
+            decoders: std::collections::HashMap::new(),
             counters: Counters::default(),
             muted: false,
             last_diagnostics: Monotonic::ZERO,
@@ -419,9 +431,9 @@ impl Engine {
             match self.rx.recv_timeout(TICK) {
                 Ok(Command::Shutdown) => break,
                 Ok(command) => {
-                    let result = std::panic::catch_unwind(
-                        std::panic::AssertUnwindSafe(|| self.handle_command(command)),
-                    );
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        self.handle_command(command)
+                    }));
                     if let Err(e) = result {
                         let msg = panic_message(&e);
                         self.sink.emit(Event::Error {
@@ -434,14 +446,11 @@ impl Engine {
                 Err(RecvTimeoutError::Disconnected) => break,
             }
 
-            let result =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.tick()));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.tick()));
             if let Err(e) = result {
                 let msg = panic_message(&e);
-                self.sink.emit(Event::Error {
-                    layer: "engine",
-                    message: format!("tick panic: {msg}"),
-                });
+                self.sink
+                    .emit(Event::Error { layer: "engine", message: format!("tick panic: {msg}") });
             }
         }
 
@@ -514,6 +523,9 @@ impl Engine {
 
         #[cfg(feature = "crypto")]
         self.keys.expire_epochs(now);
+
+        #[cfg(feature = "opus")]
+        self.play_audio_tick(now);
 
         // A call nobody answered. Ends the same way on both devices because
         // both are running the same timeout against their own clock.
@@ -612,6 +624,13 @@ impl Engine {
         let room_id = room.room_id;
         self.room = Some(room);
         self.room_identity = Some(identity);
+
+        #[cfg(feature = "crypto")]
+        {
+            // Epoch zero has no membership transition to trigger rotation, so
+            // seed the host's own sender key explicitly before the first frame.
+            let _ = self.keys.own_key_for_epoch(crate::Epoch(0));
+        }
 
         self.sink.emit(Event::RoomCreated { room_id, join_code: identity.join_code });
         self.sink
@@ -1246,15 +1265,72 @@ impl Engine {
         // order (§80). Parsing is the only step that touches attacker bytes
         // without a key, so it is the only step allowed to run first.
         match crate::protocol::MediaPacket::decode(data) {
-            Ok(_packet) => {
-                // PHASE2: authenticate and decrypt via GroupKeyManager, then
-                // push into the sender's jitter buffer.
+            Ok(packet) => {
                 self.counters.packets_received += 1;
+
+                #[cfg(all(feature = "crypto", feature = "opus"))]
+                self.accept_media_packet(packet);
             }
             Err(e) => {
                 tracing::trace!(error = %e, "malformed datagram discarded");
             }
         }
+    }
+
+    #[cfg(all(feature = "crypto", feature = "opus"))]
+    fn accept_media_packet(&mut self, mut packet: crate::protocol::MediaPacket) {
+        let Some(room) = self.room.as_ref() else { return };
+        if packet.header.room_route_id != room.room_id.route_id()
+            || packet.header.packet_type != crate::protocol::PacketType::Media
+        {
+            return;
+        }
+        let members: Vec<PeerId> = room.participants.keys().copied().collect();
+        let Some(sender) = crate::relay::resolve_sender(packet.header.sender_route_id, &members)
+        else {
+            return;
+        };
+
+        // A relay forwards the sealed packet before local playback. The relay
+        // bit is intentionally excluded from AAD, so this needs no media key.
+        if room.is_relay() && !packet.header.is_relayed() {
+            if let crate::relay::ForwardDecision::Forward { to } =
+                crate::relay::decide(&packet.header, &members, Some(sender))
+            {
+                packet.header.mark_relayed();
+                let bytes = packet.encode();
+                for route in resolve_forward(&to, &self.transport) {
+                    if let Err(error) = self.platform.send_datagram(route.path, &bytes) {
+                        self.emit_error("transport", &error);
+                    }
+                }
+            }
+        }
+
+        let aad = packet.header.associated_data();
+        let plaintext = match self.keys.open(
+            sender,
+            crate::Epoch(u64::from(packet.header.epoch)),
+            packet.header.sequence,
+            &packet.ciphertext,
+            &aad,
+        ) {
+            Ok(plaintext) => plaintext,
+            Err(error) => {
+                tracing::trace!(%error, %sender, "unauthenticated media discarded");
+                return;
+            }
+        };
+        let frame = crate::audio::EncodedFrame {
+            payload: plaintext,
+            sequence: packet.header.sequence,
+            timestamp: packet.header.timestamp,
+            talkspurt_start: packet.header.is_talkspurt_start(),
+        };
+        self.jitter
+            .entry(sender)
+            .or_insert_with(|| JitterBuffer::new(&self.config.audio))
+            .push(frame, self.clock.now());
     }
 
     fn on_reliable(&mut self, path: crate::PathId, data: &[u8]) {
@@ -1612,10 +1688,155 @@ impl Engine {
             return;
         }
 
-        // PHASE1: encode with Opus, seal with the group key manager, frame and
-        // send over the active path for each route.
-        #[cfg(feature = "crypto")]
-        let _ = self.keys.take_sequence();
+        #[cfg(all(feature = "crypto", feature = "opus"))]
+        {
+            if frame.validate(&self.config.audio).is_err() {
+                self.emit_error_message(
+                    "audio",
+                    "captured frame format does not match configuration".into(),
+                );
+                return;
+            }
+            let opus_config = self.opus_config();
+            let encoder = match self.encoder.as_mut() {
+                Some(encoder) => encoder,
+                None => match OpusVoiceEncoder::new(opus_config) {
+                    Ok(encoder) => self.encoder.insert(encoder),
+                    Err(error) => {
+                        self.emit_error("audio", &error);
+                        return;
+                    }
+                },
+            };
+            let payload = match encoder.encode_frame(&frame.samples) {
+                Ok(encoded) if !encoded.is_empty() => encoded.payload,
+                Ok(_) => return,
+                Err(error) => {
+                    self.emit_error("audio", &error);
+                    return;
+                }
+            };
+            let Some(room) = self.room.as_ref() else { return };
+            let room_id = room.room_id;
+            let epoch = room.epoch;
+            let relay = room.relay;
+            let members: Vec<PeerId> = room.participants.keys().copied().collect();
+            let topology = Topology::resolve(self.local_peer_id, &members, relay);
+            let routes = resolve_media(&topology, &members, self.local_peer_id, &self.transport);
+            if routes.is_empty() {
+                return;
+            }
+            let _ = self.keys.own_key_for_epoch(epoch);
+            let header = crate::protocol::MediaHeader::new(
+                crate::protocol::PacketType::Media,
+                room_id.route_id(),
+                self.local_peer_id.route_id(),
+                0,
+                self.keys.take_sequence(),
+                frame.timestamp,
+                epoch,
+            );
+            let aad = header.associated_data();
+            let ciphertext = match self.keys.seal(&payload, &aad) {
+                Ok(ciphertext) => ciphertext,
+                Err(error) => {
+                    self.emit_error("crypto", &error);
+                    return;
+                }
+            };
+            let packet = crate::protocol::MediaPacket::new(header, ciphertext).encode();
+            for route in routes {
+                if let Err(error) = self.platform.send_datagram(route.path, &packet) {
+                    self.emit_error("transport", &error);
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "opus")]
+    fn opus_config(&self) -> OpusConfig {
+        OpusConfig {
+            sample_rate: self.config.audio.sample_rate_hz,
+            channels: self.config.audio.channels,
+            frame_duration_ms: self.config.audio.frame_duration.as_millis() as u16,
+            bitrate: self.config.audio.target_bitrate_bps,
+            fec: self.config.audio.opus_fec,
+            dtx: false,
+            expected_packet_loss: 0,
+            complexity: 5,
+        }
+    }
+
+    #[cfg(feature = "opus")]
+    fn play_audio_tick(&mut self, now: Monotonic) {
+        if self.room.is_none() || self.jitter.is_empty() {
+            return;
+        }
+        let config = self.opus_config();
+        let mut decoded: Vec<(PeerId, crate::audio::PcmFrame)> = Vec::new();
+        let mut audio_errors = Vec::new();
+        for (peer, buffer) in &mut self.jitter {
+            match buffer.pop() {
+                Playout::Frame(frame) => {
+                    let decoder = match self.decoders.entry(*peer) {
+                        std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            match OpusVoiceDecoder::new(config) {
+                                Ok(decoder) => entry.insert(decoder),
+                                Err(error) => {
+                                    audio_errors.push(error.to_string());
+                                    continue;
+                                }
+                            }
+                        }
+                    };
+                    match decoder.decode_frame(Some(&frame.payload), false) {
+                        Ok(audio) => decoded.push((
+                            *peer,
+                            crate::audio::PcmFrame::new(
+                                audio.samples,
+                                config.sample_rate,
+                                config.channels,
+                                frame.timestamp,
+                            ),
+                        )),
+                        Err(error) => audio_errors.push(error.to_string()),
+                    }
+                }
+                Playout::Concealed { .. } => {
+                    if let Some(decoder) = self.decoders.get_mut(peer) {
+                        match decoder.decode_frame(None, false) {
+                            Ok(audio) => decoded.push((
+                                *peer,
+                                crate::audio::PcmFrame::new(
+                                    audio.samples,
+                                    config.sample_rate,
+                                    config.channels,
+                                    crate::MediaTimestamp(now.as_millis() as u32),
+                                ),
+                            )),
+                            Err(error) => audio_errors.push(error.to_string()),
+                        }
+                    }
+                }
+                Playout::Silent => {}
+            }
+        }
+        for error in audio_errors {
+            self.emit_error_message("audio", error);
+        }
+        if decoded.is_empty() {
+            return;
+        }
+        self.mixer.begin();
+        for (peer, frame) in decoded {
+            self.mixer.add(peer, &frame);
+        }
+        if let Err(error) =
+            self.platform.play(&self.mixer.finish(crate::MediaTimestamp(now.as_millis() as u32)))
+        {
+            self.emit_error("audio", &error);
+        }
     }
 
     // --- helpers ----------------------------------------------------------
