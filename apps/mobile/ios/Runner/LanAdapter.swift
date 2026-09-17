@@ -127,7 +127,8 @@ final class LanAdapter: NSObject, NetServiceDelegate {
     func connect(pathId: UInt64, address: String) {
         // PHASE1: NWConnection with QUIC parameters, interface pinned to Wi-Fi.
         // Emit PathEstablished or PathLost carrying pathId. No retry here.
-        fatalError("Phase 1: LAN QUIC connect")
+        NSLog("Anvil: native LAN connect is unavailable for path \(pathId) to \(address)")
+        emit(.pathLost(pathId: pathId, reason: "native LAN transport unavailable"))
     }
 
     private func found(_ result: NWBrowser.Result) {

@@ -45,7 +45,7 @@ enum PlatformEvent {
             object = [
                 "type": "audioCaptured",
                 "samples": samples.map(Int.init),
-                "sampleRate": sampleRate,
+                "sampleRateHz": sampleRate,
                 "channels": channels,
                 "timestamp": timestamp,
             ]

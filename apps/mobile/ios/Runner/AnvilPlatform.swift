@@ -23,6 +23,7 @@ final class AnvilPlatform {
 
     /// Native session pointer, set after `anvil_init`.
     private var sessionPtr: UnsafeMutableRawPointer?
+    private let sessionLock = NSLock()
 
     func attach(sessionPtr: UnsafeMutableRawPointer) {
         // A second attach() without a matching detach() first would retain a
@@ -73,19 +74,23 @@ final class AnvilPlatform {
             NSLog("Anvil: Rust rejected Apple platform attachment: \(result)")
             return
         }
+        sessionLock.lock()
         self.sessionPtr = sessionPtr
+        sessionLock.unlock()
         lifecycle.start()
     }
 
     func detach() {
+        sessionLock.lock()
         let session = sessionPtr
+        sessionPtr = nil
+        sessionLock.unlock()
         lifecycle.stop()
         lan.stopDiscovery()
         lan.stopAdvertising()
         aware.stopDiscovery()
         audio.stopCapture()
         audio.stopPlayback()
-        sessionPtr = nil
         if let session { anvil_detach_platform(session) }
     }
 
@@ -198,12 +203,29 @@ final class AnvilPlatform {
     // MARK: - Events to the core
 
     private func emit(_ event: PlatformEvent) {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
         guard let sessionPtr else { return }
-        event.jsonString().withCString { json in
-            let result = anvil_submit_platform_event(sessionPtr, json)
-            if result != 0 {
-                NSLog("Anvil: platform event rejected by core: \(result)")
+        let result: Int32
+        switch event {
+        case let .audioCaptured(samples, sampleRate, channels, timestamp):
+            result = samples.withUnsafeBufferPointer { buffer in
+                anvil_submit_audio(
+                    sessionPtr,
+                    buffer.baseAddress,
+                    buffer.count,
+                    UInt32(sampleRate),
+                    UInt8(channels),
+                    UInt32(timestamp)
+                )
             }
+        default:
+            result = event.jsonString().withCString { json in
+                anvil_submit_platform_event(sessionPtr, json)
+            }
+        }
+        if result != 0 {
+            NSLog("Anvil: platform event rejected by core: \(result)")
         }
     }
 }

@@ -1,37 +1,16 @@
 import Foundation
 
-/// Wi-Fi Aware on iOS (§105).
+/// Wi-Fi Aware capability boundary on iOS.
 ///
-/// **This is the highest-risk item in the whole plan, and it should be treated
-/// as an investigation rather than an implementation task.**
+/// iOS does not expose the Android-style Wi-Fi Aware/NAN API to third-party
+/// apps, so claiming this capability would create a path that cannot be
+/// established. The iOS LAN adapter is the supported peer-to-peer fallback:
+/// its Network.framework parameters opt into AWDL peer-to-peer links while
+/// keeping the Rust QUIC data plane and the protocol identical.
 ///
-/// Apple's peer-to-peer Wi-Fi story has historically been AWDL, exposed
-/// indirectly through `Network.framework`'s `includePeerToPeer` option and
-/// MultipeerConnectivity — not as a directly programmable Wi-Fi Aware / NAN
-/// API of the kind Android exposes. Whether an iOS device and an Android device
-/// can discover each other and establish a data path over Aware is an empirical
-/// question that has to be answered on real hardware, early, before Phase 5
-/// depends on it.
-///
-/// ## Plan for this
-///
-/// 1. **Answer the question first.** Before writing adapter code, build a
-///    throwaway probe: iOS publishing, Android subscribing, and the reverse.
-///    Two devices, one afternoon. The result determines the rest of Phase 5.
-/// 2. **If interop works**, implement here against whatever API provides it,
-///    keeping the same event surface as `WifiAwareAdapter.kt` so the core does
-///    not learn the difference.
-/// 3. **If it does not**, the fallback is already in the architecture and costs
-///    no protocol change: one device hosts a local network — a personal hotspot
-///    or Android's Wi-Fi Direct group — and the others join it as a *LAN* path.
-///    Anvil's transport abstraction means the room, the identities, the keys and
-///    the relay all work identically over that path. Only the discovery and
-///    setup UX would change.
-///
-/// Writing this down now, rather than discovering it in Phase 5, is the
-/// difference between a known trade-off and a schedule surprise.
-///
-/// PHASE5.
+/// Android uses its real WifiAwareSession adapter. Keeping this object as an
+/// explicit false capability prevents the core from trying to call a fake
+/// transport on iOS and makes the platform difference visible in diagnostics.
 final class WifiAwareAdapter {
 
     private let emit: (PlatformEvent) -> Void
@@ -40,29 +19,20 @@ final class WifiAwareAdapter {
         self.emit = emit
     }
 
-    /// Conservatively false until the interop question above is answered.
-    ///
-    /// Reporting false means the core simply runs LAN-only, which is correct
-    /// and honest, rather than advertising a path that does not work.
     func isAvailable() -> Bool { false }
 
     func startDiscovery() {
-        // PHASE5
+        emit(.networkChanged(kind: "wifi-aware", available: false))
     }
 
-    func stopDiscovery() {
-        // PHASE5
-    }
+    func stopDiscovery() {}
 
-    func advertise(_ payload: Data) {
-        // PHASE5
-    }
+    func advertise(_ payload: Data) {}
 
-    func stopAdvertising() {
-        // PHASE5
-    }
+    func stopAdvertising() {}
 
     func connect(pathId: UInt64, address: String) {
-        // PHASE5
+        NSLog("Anvil: iOS has no public Wi-Fi Aware API for path \(pathId) to \(address)")
+        emit(.pathLost(pathId: pathId, reason: "Wi-Fi Aware is unavailable on iOS"))
     }
 }

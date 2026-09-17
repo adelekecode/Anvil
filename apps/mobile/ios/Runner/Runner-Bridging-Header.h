@@ -27,3 +27,10 @@ typedef struct {
 int32_t anvil_attach_platform(void *session, const AnvilPlatformCallbacks *callbacks);
 void anvil_detach_platform(void *session);
 int32_t anvil_submit_platform_event(void *session, const char *json);
+int32_t anvil_submit_audio(
+    void *session,
+    const int16_t *samples,
+    size_t sample_count,
+    uint32_t sample_rate_hz,
+    uint8_t channels,
+    uint32_t timestamp);

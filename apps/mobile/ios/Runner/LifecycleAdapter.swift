@@ -22,15 +22,62 @@ final class LifecycleAdapter {
     }
 
     func start() {
+        guard observers.isEmpty else { return }
         UIDevice.current.isBatteryMonitoringEnabled = true
-        // PHASE1: observe didEnterBackgroundNotification,
-        // willEnterForegroundNotification, batteryLevelDidChangeNotification,
-        // batteryStateDidChangeNotification and thermalStateDidChangeNotification.
+        let center = NotificationCenter.default
+        observers.append(center.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in self?.emit(.lifecycleChanged(foreground: false)) })
+        observers.append(center.addObserver(
+            forName: UIApplication.willEnterForegroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in self?.emit(.lifecycleChanged(foreground: true)) })
+        observers.append(center.addObserver(
+            forName: UIDevice.batteryLevelDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in self?.emitStatus() })
+        observers.append(center.addObserver(
+            forName: UIDevice.batteryStateDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in self?.emitStatus() })
+        if #available(iOS 11.0, *) {
+            observers.append(center.addObserver(
+                forName: ProcessInfo.thermalStateDidChangeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in self?.emitStatus() })
+        }
+        emit(.lifecycleChanged(foreground: true))
+        emitStatus()
     }
 
     func stop() {
         observers.forEach(NotificationCenter.default.removeObserver)
         observers.removeAll()
         UIDevice.current.isBatteryMonitoringEnabled = false
+    }
+
+    private func emitStatus() {
+        let level = UIDevice.current.batteryLevel
+        let percentage: Int? = level >= 0 ? Int((level * 100).rounded()) : nil
+        let state = UIDevice.current.batteryState
+        let charging = state == .charging || state == .full
+        let throttled: Bool
+        if #available(iOS 11.0, *) {
+            throttled = ProcessInfo.processInfo.thermalState == .serious ||
+                ProcessInfo.processInfo.thermalState == .critical
+        } else {
+            throttled = false
+        }
+        emit(.deviceStatus(
+            batteryPct: percentage,
+            charging: charging,
+            thermallyThrottled: throttled
+        ))
     }
 }
